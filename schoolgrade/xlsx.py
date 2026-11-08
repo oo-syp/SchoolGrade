@@ -53,7 +53,7 @@ def _sheet_xml(sheet):
     out = []
     r = 0
     merges = []
-    ncols = max([len(headers)] + [len(x) for x in rows] + [1])
+    ncols = max([len(headers)] + [len(x) for x in rows if not isinstance(x, dict)] + [1])
     if title:
         out.append('<row r="{}">{}</row>'.format(r + 1, _cell("A{}".format(r + 1), title, 3)))
         merges.append("A{0}:{1}{0}".format(r + 1, _col(max(ncols - 1, 0))))
@@ -64,11 +64,22 @@ def _sheet_xml(sheet):
             r += 1
     if title or subtitle:
         r += 1
-    if headers:
+    if headers and not sheet.get("repeat_headers"):
         cells = "".join(_cell("{}{}".format(_col(i), r + 1), h, 2) for i, h in enumerate(headers))
         out.append('<row r="{}">{}</row>'.format(r + 1, cells))
         r += 1
     for row in rows:
+        if isinstance(row, dict):  # заголовок блока (сводный отчёт за несколько периодов)
+            if out and sheet.get("repeat_headers"):
+                r += 1
+            out.append('<row r="{}">{}</row>'.format(r + 1, _cell("A{}".format(r + 1), row.get("group", ""), 3)))
+            merges.append("A{0}:{1}{0}".format(r + 1, _col(max(ncols - 1, 0))))
+            r += 1
+            if sheet.get("repeat_headers") and headers:
+                cells = "".join(_cell("{}{}".format(_col(i), r + 1), h, 2) for i, h in enumerate(headers))
+                out.append('<row r="{}">{}</row>'.format(r + 1, cells))
+                r += 1
+            continue
         cells = "".join(_cell("{}{}".format(_col(i), r + 1), v, 1) for i, v in enumerate(row))
         out.append('<row r="{}">{}</row>'.format(r + 1, cells))
         r += 1

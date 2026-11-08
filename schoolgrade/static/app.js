@@ -137,8 +137,13 @@
       return h("th", { class: (vf !== undefined && i >= vf && i < vt) ? "vert" : "n" }, x);
     }));
     var body = rep.rows.map(function (r) {
+      if (r && !Array.isArray(r)) {
+        var gr = [h("tr", { class: "grp" }, h("td", { colspan: rep.headers.length }, r.group || ""))];
+        if (rep.repeat_headers) gr.push(h("tr", { class: "hdr" }, rep.headers.map(function (x) { return h("th", { class: "n" }, x); })));
+        return gr;
+      }
       var first = String(r[0] || "") + String(r[1] || "");
-      var cls = /ИТОГО|Средний балл/.test(first) ? "total" : (rep.group_rows && r[0] === "" && r[1]) ? "grp" : "";
+      var cls = /ИТОГО|Итого|Средний балл/.test(first) ? "total" : (rep.group_rows && r[0] === "" && r[1]) ? "grp" : "";
       return h("tr", { class: cls }, r.map(function (c, i) {
         var td = h("td", { class: (typeof c === "number" || /^[\d,.\-–]+$|^(н\/а|осв\.|зач\.|незач\.|н\/и|прим\.|уд\.|неуд\.)$/.test(String(c))) ? "n" : "" }, c === null ? "" : c);
         if (vf !== undefined && i >= vf && i < vt && c) td.className += " " + lvClass(String(c));
@@ -148,7 +153,7 @@
     var box = h("div", { class: "card report" },
       h("h2", { style: { marginTop: 0 } }, rep.title),
       rep.subtitle ? h("div", { class: "muted", style: { whiteSpace: "pre-line", marginBottom: "10px" } }, rep.subtitle) : null,
-      h("div", { class: "tw" }, h("table", { class: "t" }, h("thead", null, thead), h("tbody", null, body))),
+      h("div", { class: "tw" }, h("table", { class: "t" }, rep.repeat_headers ? null : h("thead", null, thead), h("tbody", null, body))),
       (rep.footer || []).map(function (f) { return h("div", { class: "hint" }, f); }));
     return box;
   }
@@ -159,12 +164,31 @@
       S.me = await GET("/api/me");
       S.year = S.me.current_year;
       if (S.me.user.must_change) return renderChangePassword(true);
+      if (!S.me.org_type && S.me.user.can_manage) return renderOrgChooser();
       renderShell();
       route();
     } catch (e) {
       if (!S.me) renderLogin();
     }
   }
+
+  function renderOrgChooser() {
+    var sel2 = h("select", { style: { width: "100%", padding: "8px", marginTop: "12px" } },
+      S.me.org_types.map(function (o) { return h("option", { value: o.code }, o.name); }));
+    var go = safe(async function (e) {
+      e && e.preventDefault();
+      await PUT("/api/org_type", { org_type: sel2.value });
+      S.me = await GET("/api/me"); S.year = S.me.current_year;
+      renderShell(); location.hash = "#/"; route();
+    });
+    clear($app).appendChild(h("div", { class: "login" }, h("form", { class: "box", onsubmit: go, style: { width: "440px" } },
+      h("h1", null, "Тип учреждения"),
+      h("div", { class: "muted" }, "Выберите тип организации. От него зависит набор предметов типового учебного плана. Тип можно изменить позже в паспорте учреждения."),
+      sel2,
+      h("div", { class: "hint", style: { marginTop: "8px" } }, "Для района/города выберите «Отдел (управление) образования» — такой режим только собирает своды по школам."),
+      h("button", { class: "pri", type: "submit", style: { width: "100%", marginTop: "14px", padding: "9px" } }, "Продолжить"))));
+  }
+  function deptMode() { return !!(S.me && S.me.department_mode); }
 
   async function renderLogin() {
     var about = {};
@@ -201,17 +225,21 @@
   }
 
   // ===================================================================== оболочка
-  var NAV = [
+  var NAV_SCHOOL = [
     ["Работа", [["#/", "Главная"], ["#/sheet", "Ведомость класса"], ["#/journal", "Электронный журнал", "journal"], ["#/finals", "Отметки по предмету"], ["#/behavior", "Поведение и итоги года"]]],
-    ["Анализ", [["#/reports", "Отчёты и аналитика"], ["#/department", "Отдел образования", "all"]]],
+    ["Анализ", [["#/reports", "Отчёты и аналитика"], ["#/department", "Передать в отдел образования", "all"]]],
     ["Данные", [["#/classes", "Классы и нагрузка"], ["#/students", "Учащиеся"], ["#/staff", "Сотрудники", "manage"], ["#/subjects", "Предметы", "manage"]]],
     ["Учреждение", [["#/school", "Паспорт учреждения"], ["#/years", "Учебный год", "manage"], ["#/admin", "Администрирование", "admin"], ["#/about", "О программе"]]],
+  ];
+  var NAV_DEPT = [
+    ["Отдел образования", [["#/", "Главная"], ["#/department", "Свод по учреждениям"]]],
+    ["Настройки", [["#/school", "Сведения об отделе", "manage"], ["#/admin", "Администрирование", "admin"], ["#/about", "О программе"]]],
   ];
   var $main;
   function renderShell() {
     var u = S.me.user;
     var nav = h("nav", { class: "nav" });
-    NAV.forEach(function (g) {
+    (deptMode() ? NAV_DEPT : NAV_SCHOOL).forEach(function (g) {
       var items = g[1].filter(function (it) {
         if (it[2] === "admin") return u.can_admin;
         if (it[2] === "manage") return u.can_manage;
@@ -255,7 +283,7 @@
     S.rid++;
     var fn = ROUTES[name] || ROUTES[""];
     if (name === "password") return pagePassword();
-    if (!S.year && ["", "about", "years", "school", "admin", "subjects", "staff"].indexOf(name) < 0) {
+    if (!deptMode() && !S.year && ["", "about", "years", "school", "admin", "subjects", "staff"].indexOf(name) < 0) {
       $main.appendChild(h("div", { class: "card" }, h("h2", null, "Учебный год не создан"),
         S.me.user.can_manage ? h("a", { href: "#/years" }, "Создайте учебный год") : "Обратитесь к администратору."));
       return;
@@ -294,6 +322,14 @@
   ROUTES[""] = async function () {
     var u = S.me.user;
     head("Здравствуйте, " + (u.full_name || u.login), (S.me.school["Наименование"] || "") + (S.year ? " · " + S.year.name + " учебный год" : ""));
+    if (deptMode()) {
+      var pk = await GET("/api/department/packages");
+      $main.appendChild(h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Режим «Отдел (управление) образования»"),
+        h("p", null, "Загружено пакетов от учреждений: " + pk.length + "."),
+        h("div", { class: "bar" }, h("a", { class: "btn pri", href: "#/department" }, "Свод по учреждениям"),
+          h("a", { class: "btn", href: "#/school" }, "Сведения об отделе"))));
+      return;
+    }
     if (!S.year) return;
     await loadPeriods();
     var tiles = h("div", { class: "tiles" });
@@ -357,22 +393,37 @@
       return;
     }
     await loadPeriods();
-    head("Электронный журнал", "Текущие отметки и пропуски по урокам");
+    head("Электронный журнал", "Сначала выберите класс, затем предмет");
     var kind = params.period || curKind();
     var bar = h("div", { class: "bar" });
     $main.appendChild(bar);
     var area = h("div");
     $main.appendChild(area);
-    var picker = await assignmentPicker(params, function (v) { params.aid = v; setParams(params); load(); });
+    var classes = await GET("/api/classes", { year_id: yid() });
+    var cs = sel([["", "— класс —"]].concat(classes.map(function (c) { return [c.id, c.name + " класс"]; })), params.cid || "");
     var ps = sel(kindsOf(), kind);
-    ps.onchange = function () { params.period = ps.value; setParams(params); load(); };
-    bar.appendChild(picker); bar.appendChild(ps);
+    ps.onchange = function () { params.period = ps.value; setParams(params); if (params.aid) load(); };
+    bar.appendChild(cs); bar.appendChild(ps);
     var load = safe(async function () {
       clear(area);
-      if (!params.aid) { area.appendChild(h("div", { class: "card muted" }, "Выберите класс и предмет.")); return; }
-      var J = await GET("/api/journal/" + params.aid, { period: ps.value });
-      renderJournal(area, J, load);
+      if (!params.cid) { area.appendChild(h("div", { class: "card muted" }, "Выберите класс.")); return; }
+      var asg = await GET("/api/assignments", { class_id: params.cid });
+      // предметы класса плиткой
+      var grid = h("div", { class: "subjgrid" }, asg.map(function (a) {
+        var tag = a.category && a.category !== "subject" ? (a.category === "fz" ? " · ФЗ" : " · ОпИ") : "";
+        return h("a", { href: "javascript:void 0", class: "subjcard" + (String(a.id) === String(params.aid) ? " on" : ""),
+          onclick: function () { params.aid = a.id; setParams(params); load(); } },
+          h("b", null, a.subject + (a.group_name ? " (" + a.group_name + ")" : "")),
+          h("small", null, (a.teacher || "—") + tag));
+      }));
+      area.appendChild(h("div", { class: "card" }, h("h3", { style: { marginTop: 0 } }, "Предметы класса"), asg.length ? grid : h("div", { class: "muted" }, "Классу не назначены предметы.")));
+      if (params.aid && asg.some(function (a) { return String(a.id) === String(params.aid); })) {
+        var jarea = h("div"); area.appendChild(jarea);
+        var J = await GET("/api/journal/" + params.aid, { period: ps.value });
+        renderJournal(jarea, J, load);
+      }
     });
+    cs.onchange = function () { params.cid = cs.value; params.aid = ""; setParams(params); load(); };
     load();
   };
 
@@ -692,14 +743,17 @@
     ["students_list", "Список учащихся класса (персональные данные)", "class_only"],
     ["student", "Табель / сведения об учащемся для законных представителей", "student"],
     ["school", "Успеваемость по классам и параллелям учреждения", "all"],
+    ["levels_parallel", "Успеваемость по параллелям по уровням (за период или за все периоды)", "levels"],
+    ["school_subjects", "Аналитическая информация по предметам (вся школа)", "all"],
     ["parallel", "Аналитика по предметам в параллели", "grade"],
     ["lists", "Списки: на 9–10, 7–10, резерв, низкий уровень, н/а", "all"],
     ["teacher", "Отчёт учителя", "teacher"],
+    ["clubs", "Посещаемость факультативов и объединений по интересам", "category"],
   ];
   ROUTES.reports = async function (params) {
     head("Отчёты и аналитика", "Все отчёты можно распечатать или выгрузить в Excel");
     var u = S.me.user;
-    var avail = REPORTS.filter(function (r) { return (["all", "grade"].indexOf(r[2]) < 0 || u.can_manage || u.role === "viewer") && (r[0] !== "attendance" || journalOn()); });
+    var avail = REPORTS.filter(function (r) { return (["all", "grade", "category", "levels"].indexOf(r[2]) < 0 || u.can_manage || u.role === "viewer") && (r[0] !== "attendance" || journalOn()); });
     var type = sel(avail.map(function (r) { return [r[0], r[1]]; }), params.type || avail[0][0]);
     var bar = h("div", { class: "bar" }, type);
     var pbar = h("div", { class: "bar" });
@@ -739,7 +793,12 @@
         ctrls.from = h("input", { type: "date", value: params.from || p.start_date || "" }); ctrls.to = h("input", { type: "date", value: params.to || p.end_date || "" });
         pbar.appendChild(field("с", ctrls.from)); pbar.appendChild(field("по", ctrls.to));
       }
+      if (need === "category") {
+        ctrls.category = sel([["fz", "Факультативы (ФЗ)"], ["opi", "Объединения по интересам (ОпИ)"]], params.category || "fz");
+        pbar.appendChild(ctrls.category);
+      }
       if (["class", "all", "grade", "teacher"].indexOf(need) >= 0) { ctrls.kind = sel(kindsOf(true), params.kind || curKind()); pbar.appendChild(ctrls.kind); }
+      if (need === "levels") { ctrls.kind = sel(kindsOf(true).concat([["all", "Все периоды (сводно)"]]), params.kind || "all"); pbar.appendChild(ctrls.kind); }
       var args = function () { var o = { year_id: yid() }; for (var k in ctrls) o[k] = ctrls[k].value; return o; };
       pbar.appendChild(h("button", { class: "pri", onclick: safe(async function () {
         var a = args(); params = Object.assign({ type: type.value }, a); setParams(params);
@@ -756,39 +815,57 @@
 
   // ===================================================================== отдел образования
   ROUTES.department = async function () {
-    head("Отдел образования", "Передача сводных данных в отдел (управление) образования и свод по учреждениям");
-    var c1 = h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Файл для передачи данных в отдел образования"),
-      h("p", null, "Содержит паспорт учреждения, педагогических работников и сводную аналитику успеваемости по классам, параллелям и предметам за все периоды учебного года ",
+    if (!deptMode()) return deptExportPage();
+    head("Свод по учреждениям образования", "Загрузите пакеты .sgdep.json, полученные от школ, — программа построит свод");
+    var res = h("div");
+    var pk = await GET("/api/department/packages");
+    var ks = sel(kindsOf(true), "year");
+    var bar = h("div", { class: "bar" },
+      h("button", { class: "pri", onclick: safe(async function () {
+        var fs = await pickFile(".json", true); if (!fs.length) return;
+        var files = [];
+        for (var i = 0; i < fs.length; i++) files.push({ filename: fs[i].name, data: await fileToB64(fs[i]) });
+        var r = await POST("/api/department/packages", { files: files });
+        toast("Загружено пакетов: " + r.added); route();
+      }) }, "Загрузить пакеты (.sgdep.json)"),
+      ks,
+      h("button", { onclick: safe(async function () {
+        var r = await GET("/api/department/summary", { kind: ks.value });
+        clear(res); r.reports.forEach(function (rep) { res.appendChild(reportTable(rep)); });
+      }) }, "Построить свод"),
+      h("button", { onclick: function () { download("/api/department/summary", { kind: ks.value, format: "xlsx" }); } }, "Свод в Excel"));
+    $main.appendChild(bar);
+    var tb = h("table", { class: "t" }, h("thead", null, h("tr", null, ["Учреждение", "Уч. год", "Файл", "Загружен", ""].map(function (x) { return h("th", null, x); }))),
+      h("tbody", null, pk.map(function (p) {
+        return h("tr", null, h("td", null, h("a", { href: "javascript:void 0", onclick: function () { deptPassport(p.id); } }, p.school)),
+          h("td", null, p.year), h("td", { class: "muted" }, p.filename), h("td", null, p.uploaded_at),
+          h("td", null, h("button", { class: "sm danger", onclick: safe(async function () { if (!confirmBox("Удалить пакет «" + p.school + "»?")) return; await DEL("/api/department/packages/" + p.id); route(); }) }, "удалить")));
+      })));
+    $main.appendChild(h("div", { class: "card" }, h("h3", { style: { marginTop: 0 } }, "Загруженные учреждения (" + pk.length + ")"),
+      pk.length ? h("div", { class: "tw" }, tb) : h("div", { class: "muted" }, "Пакеты не загружены.")));
+    $main.appendChild(res);
+  };
+
+  var deptPassport = safe(async function (pid) {
+    var d = await GET("/api/department/package/" + pid);
+    var body = h("div", null, d.fields.map(function (g) {
+      return h("div", null, h("h3", null, g[0]), g[1].map(function (k) {
+        return (d.school[k]) ? h("div", null, h("b", null, k + ": "), d.school[k]) : null;
+      }));
+    }));
+    modal("Карточка УО: " + (d.school["Наименование"] || ""), body, []);
+  });
+
+  function deptExportPage() {
+    head("Передача данных в отдел образования", "Сводные данные без персональных сведений учащихся");
+    $main.appendChild(h("div", { class: "card" },
+      h("p", null, "Файл содержит паспорт учреждения, педагогических работников и сводную аналитику по классам, параллелям и предметам за все периоды ",
         h("b", null, "без персональных данных учащихся"), "."),
       h("div", { class: "bar" },
         h("button", { class: "pri", onclick: function () { download("/api/export/department", { year_id: yid(), format: "xlsx" }); } }, "Скачать Excel (.xlsx)"),
-        h("button", { onclick: function () { download("/api/export/department", { year_id: yid(), format: "json" }); } }, "Скачать пакет для свода (.sgdep.json)")));
-    var res = h("div");
-    var ks = sel(kindsOf(true), "year");
-    var files = [];
-    var flist = h("div", { class: "muted" }, "Файлы не выбраны");
-    var c2 = h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Свод по учреждениям (для специалистов отдела образования)"),
-      h("p", null, "Загрузите пакеты .sgdep.json, полученные от учреждений образования, — программа построит свод по учреждениям и по предметам."),
-      h("div", { class: "bar" },
-        h("button", { onclick: safe(async function () {
-          var fs = await pickFile(".json", true);
-          files = [];
-          for (var i = 0; i < fs.length; i++) files.push({ filename: fs[i].name, data: await fileToB64(fs[i]) });
-          flist.textContent = files.map(function (f) { return f.filename; }).join(", ") || "Файлы не выбраны";
-        }) }, "Выбрать файлы…"), ks,
-        h("button", { class: "pri", onclick: safe(async function () {
-          if (!files.length) throw new Error("Выберите файлы пакетов");
-          var r = await POST("/api/department/merge", { files: files, kind: ks.value });
-          clear(res); r.reports.forEach(function (rep) { res.appendChild(reportTable(rep)); });
-        }) }, "Построить свод"),
-        h("button", { onclick: safe(async function () {
-          if (!files.length) throw new Error("Выберите файлы пакетов");
-          var r = await fetch("/api/department/merge?format=xlsx", { method: "POST", headers: { "X-SchoolGrade": "1", "Content-Type": "application/json" }, body: JSON.stringify({ files: files, kind: ks.value }) });
-          if (!r.ok) throw new Error("Ошибка формирования");
-          var b = await r.blob(); var a = h("a", { href: URL.createObjectURL(b), download: "Свод_отдел_образования.xlsx" }); document.body.appendChild(a); a.click(); a.remove();
-        }) }, "Свод в Excel")), flist);
-    $main.appendChild(c1); $main.appendChild(c2); $main.appendChild(res);
-  };
+        h("button", { onclick: function () { download("/api/export/department", { year_id: yid(), format: "json" }); } }, "Скачать пакет для свода (.sgdep.json)")),
+      h("div", { class: "hint" }, "Пакет .sgdep.json отправьте в отдел образования: там из пакетов всех школ строится свод по району.")));
+  }
 
   // ===================================================================== классы
   ROUTES.classes = async function (params) {
@@ -876,10 +953,15 @@
             toast("Добавлено: " + r.added); route();
           } }]);
       } }, "+ Предметы"));
+      if (u.can_manage) bar2.appendChild(h("button", { onclick: safe(async function () {
+        if (!confirmBox("Добавить в " + c.name + " класс предметы типового учебного плана для " + c.grade + " параллели? Уже добавленные предметы не дублируются.")) return;
+        var r = await POST("/api/classes/" + c.id + "/autoload", {}); toast("Добавлено предметов: " + r.added); route();
+      }) }, "Предметы типового плана"));
       area.appendChild(bar2);
+      var evName = { points: "10 баллов", pass: "зачёт", none: "без отметок", attend: "посещение" };
       var rows2 = asg.map(function (a) {
-        return h("tr", null, h("td", null, a.subject), h("td", null, a.group_name || ""), h("td", null, a.teacher || "—"), h("td", { class: "n" }, a.hours),
-          h("td", null, { points: "10 баллов", pass: "зачёт", none: "без отметок" }[a.eval_type]), h("td", { class: "n" }, a.n_sub ? a.n_sub + " уч-ся" : "весь класс"),
+        return h("tr", null, h("td", null, a.subject + (a.category && a.category !== "subject" ? " [" + (a.category === "fz" ? "ФЗ" : "ОпИ") + "]" : "")), h("td", null, a.group_name || ""), h("td", null, a.teacher || "—"), h("td", { class: "n" }, a.hours),
+          h("td", null, evName[a.eval_type] || a.eval_type), h("td", { class: "n" }, a.n_sub ? a.n_sub + " уч-ся" : "весь класс"),
           h("td", null, journalOn() ? h("a", { href: "#/journal?aid=" + a.id }, "журнал") : h("a", { href: "#/finals?aid=" + a.id }, "отметки"), " ", u.can_manage ? h("button", { class: "sm", onclick: function () { asgDialog(a); } }, "изменить") : null));
       });
       area.appendChild(h("div", { class: "tw" }, h("table", { class: "t" }, h("thead", null, h("tr", null, ["Предмет", "Группа", "Учитель", "Ч/нед", "Оценивание", "Состав", ""].map(function (x) { return h("th", null, x); }))), h("tbody", null, rows2))));
@@ -954,7 +1036,7 @@
   var studentDialog = safe(async function (sid, cid, after) {
     var data = {}, hist = [], canEdit = true;
     if (sid) { var r = await GET("/api/students/" + sid); data = r.student; hist = r.history; canEdit = r.can_edit; }
-    var f = buildForm(STUDENT_FORM(), data);
+    var f = buildForm(visibleForm(STUDENT_FORM()), data);
     var body = h("div", null, f, hist.length ? h("div", null, h("h3", null, "Движение по классам"),
       hist.map(function (x) { return h("div", { class: "muted" }, x.year + ": " + x.class_name + " класс" + (x.date_in ? ", с " + fmtDate(x.date_in) : "") + (x.date_out ? " по " + fmtDate(x.date_out) : "") + (x.note ? " (" + x.note + ")" : "") + (x.year_result ? " — " + x.year_result : "")); })) : null,
       h("div", { class: "hint" }, "Обработка персональных данных осуществляется в соответствии с Законом Республики Беларусь от 07.05.2021 № 99-З «О защите персональных данных». Просмотр карточки фиксируется в журнале действий."));
@@ -1004,7 +1086,7 @@
       { k: "pc_skill", label: "Владение ПК", type: "list", options: ["базовое", "уверенное", "продвинутое"] }, { k: "active", label: "Работает", type: "check", def: true },
       { k: "note", label: "Примечание", type: "textarea", wide: true }];
     var dlg = function (s) {
-      var f = buildForm(FORM, s || {});
+      var f = buildForm(visibleForm(FORM), s || {});
       var b = [{ text: "Сохранить", cls: "pri", fn: async function () { if (s) await PUT("/api/staff/" + s.id, f.values()); else await POST("/api/staff", f.values()); route(); } }];
       if (s) b.push({ text: "Удалить", cls: "danger", fn: async function () { if (!confirmBox("Удалить сотрудника? Лучше снять отметку «Работает».")) return false; await DEL("/api/staff/" + s.id); route(); } });
       modal(s ? "Сотрудник" : "Новый сотрудник", f, b);
@@ -1019,21 +1101,45 @@
   };
 
   // ===================================================================== предметы
+  var CAT_NAME = function () { return S.me.categories; };
+  async function subjectDelete(s) {
+    try { await DEL("/api/subjects/" + s.id); route(); }
+    catch (e) {
+      if (e.status === 409 && e.message.indexOf("confirm_code:") === 0) {
+        var code = e.message.split(":")[1];
+        var inp = h("input", { style: { fontSize: "20px", letterSpacing: "4px", textAlign: "center", width: "160px" } });
+        modal("Подтверждение удаления", h("div", null,
+          h("p", null, "По предмету «" + s.name + "» выставлены отметки. Чтобы удалить предмет вместе со всеми отметками, введите код:"),
+          h("div", { style: { fontSize: "26px", fontWeight: "700", letterSpacing: "6px", textAlign: "center", margin: "10px 0" } }, code),
+          field("Код подтверждения", inp)),
+          [{ text: "Удалить", cls: "danger", fn: async function () {
+            if (inp.value.trim() !== code) { toast("Код введён неверно", true); return false; }
+            await api("DELETE", "/api/subjects/" + s.id + "?code=" + code); route();
+          } }]);
+        setTimeout(function () { inp.focus(); }, 50);
+      } else throw e;
+    }
+  }
   ROUTES.subjects = async function () {
+    var catOpts = Object.keys(CAT_NAME()).map(function (k) { return [k, CAT_NAME()[k]]; });
     var FORM = [{ k: "name", label: "Название", wide: true }, { k: "short", label: "Сокращение (для ведомости)" }, { k: "sort", label: "Порядок", type: "number" },
-      { k: "eval_type", label: "Оценивание по умолчанию", type: "select", options: [["points", "10 баллов"], ["pass", "зачёт"], ["none", "без отметок"]] }, { k: "active", label: "Активен", type: "check", def: true }];
+      { k: "category", label: "Категория", type: "select", options: catOpts },
+      { k: "eval_type", label: "Оценивание", type: "select", options: [["points", "10 баллов"], ["pass", "зачёт"], ["none", "без отметок"], ["attend", "только посещение (н / выб)"]] },
+      { k: "active", label: "Активен", type: "check", def: true }];
     var dlg = function (s) {
-      var f = buildForm(FORM, s || { sort: 500, eval_type: "points" });
+      var f = buildForm(FORM, s || { sort: 500, eval_type: "points", category: "subject" });
       var b = [{ text: "Сохранить", cls: "pri", fn: async function () { if (s) await PUT("/api/subjects/" + s.id, f.values()); else await POST("/api/subjects", f.values()); route(); } }];
-      if (s) b.push({ text: "Удалить", cls: "danger", fn: async function () { await DEL("/api/subjects/" + s.id); route(); } });
-      modal(s ? "Предмет" : "Новый предмет", f, b);
+      if (s) b.push({ text: "Удалить", cls: "danger", fn: async function () { await subjectDelete(s); return false; } });
+      modal(s ? "Предмет" : "Новый предмет", h("div", null, f,
+        h("div", { class: "hint" }, "Факультатив (ФЗ) и объединение по интересам (ОпИ) — только учёт посещения (н / выбыл), в отметки и отчёты успеваемости не входят, занятия можно проводить в каникулы.")), b);
     };
-    head("Учебные предметы", "Перечень согласно типовому учебному плану", h("button", { class: "pri", onclick: function () { dlg(null); } }, "+ Предмет"));
+    head("Учебные предметы, факультативы и объединения", "Категории: учебные предметы, ФЗ, ОпИ", h("button", { class: "pri", onclick: function () { dlg(null); } }, "+ Предмет"));
     var rows = await GET("/api/subjects");
-    $main.appendChild(h("div", { class: "tw" }, h("table", { class: "t" }, h("thead", null, h("tr", null, ["№", "Предмет", "Сокр.", "Оценивание", "Статус"].map(function (x) { return h("th", null, x); }))),
+    $main.appendChild(h("div", { class: "tw" }, h("table", { class: "t" }, h("thead", null, h("tr", null, ["№", "Название", "Сокр.", "Категория", "Оценивание", "Статус"].map(function (x) { return h("th", null, x); }))),
       h("tbody", null, rows.map(function (s, i) {
         return h("tr", { class: s.active ? "" : "muted" }, h("td", { class: "n" }, i + 1), h("td", null, h("a", { href: "javascript:void 0", onclick: function () { dlg(s); } }, s.name)), h("td", null, s.short),
-          h("td", null, { points: "10 баллов", pass: "зачёт", none: "без отметок" }[s.eval_type]), h("td", null, s.active ? "" : "не используется"));
+          h("td", null, CAT_NAME()[s.category] || "—"),
+          h("td", null, { points: "10 баллов", pass: "зачёт", none: "без отметок", attend: "посещение" }[s.eval_type]), h("td", null, s.active ? "" : "не используется"));
       })))));
   };
 
@@ -1041,7 +1147,7 @@
   ROUTES.school = async function () {
     var r = await GET("/api/school");
     var can = S.me.user.can_manage;
-    head("Паспорт учреждения образования", null, can ? h("button", { class: "pri", onclick: safe(async function () {
+    head(deptMode() ? "Сведения об отделе (управлении) образования" : "Паспорт учреждения образования", null, can ? h("button", { class: "pri", onclick: safe(async function () {
       var v = {}; Array.prototype.forEach.call($main.querySelectorAll("[data-k]"), function (i) { v[i.getAttribute("data-k")] = i.value; });
       await PUT("/api/school", v); S.me.school = v; toast("Сохранено");
     }) }, "Сохранить") : null);
@@ -1087,39 +1193,88 @@
   ROUTES.admin = async function (params) {
     head("Администрирование");
     var tab = params.tab || "users";
-    $main.appendChild(h("div", { class: "tabs" }, [["users", "Пользователи"], ["rules", "Настройки и правила"], ["backup", "Резервные копии"], ["audit", "Журнал действий"]].map(function (t) {
+    var tabs = [["users", "Пользователи"], ["rules", "Настройки и правила"], ["fields", "Тип и поля"], ["transfer", "Перенос данных"], ["backup", "Резервные копии"], ["audit", "Журнал действий"]];
+    $main.appendChild(h("div", { class: "tabs" }, tabs.map(function (t) {
       return h("a", { href: "javascript:void 0", class: tab === t[0] ? "on" : "", onclick: function () { params.tab = t[0]; setParams(params); route(); } }, t[1]);
     })));
     if (tab === "users") {
       var users = await GET("/api/users"), staff = await GET("/api/staff");
-      var staffOpts = [["", "—"]].concat(staff.map(function (s) { return [s.id, s.short]; }));
       var roleOpts = Object.keys(S.me.roles).map(function (k) { return [k, S.me.roles[k]]; });
       var dlg = function (u) {
         var f = buildForm([{ k: "login", label: "Логин" }, { k: "full_name", label: "Имя для отображения" }, { k: "role", label: "Роль", type: "select", options: roleOpts },
-          { k: "staff_id", label: "Сотрудник (для учителей и кл. руководителей)", type: "select", options: staffOpts }, { k: "password", label: u ? "Новый пароль (если нужно сбросить)" : "Пароль", type: "password" },
+          { k: "password", label: u ? "Новый пароль (если нужно сбросить)" : "Пароль", type: "password" },
           { k: "active", label: "Активен", type: "check", def: true }], u || { role: "teacher" });
         if (u) f.querySelector("input").disabled = true;
-        modal(u ? "Пользователь " + u.login : "Новый пользователь", h("div", null, f, h("div", { class: "hint" }, "При первом входе пользователь обязан сменить пароль.")),
-          [{ text: "Сохранить", cls: "pri", fn: async function () { var v = f.values(); if (u) await PUT("/api/users/" + u.id, v); else await POST("/api/users", v); route(); } }].concat(u ? [{ text: "Удалить", cls: "danger", fn: async function () { if (!confirmBox("Удалить пользователя?")) return false; await DEL("/api/users/" + u.id); route(); } }] : []));
+        var linked = (u && u.staff_ids) || [];
+        var staffBox = h("div", { style: { maxHeight: "180px", overflow: "auto", border: "1px solid #ddd", borderRadius: "5px", padding: "6px", columns: "2" } },
+          staff.filter(function (s) { return s.active; }).map(function (s) {
+            return h("label", { style: { display: "block" } }, h("input", { type: "checkbox", value: s.id, checked: linked.indexOf(s.id) >= 0 }), " " + s.short);
+          }));
+        modal(u ? "Пользователь " + u.login : "Новый пользователь", h("div", null, f,
+          h("div", { style: { marginTop: "8px" } }, h("b", null, "Сотрудники учётной записи"),
+            h("div", { class: "hint" }, "Можно привязать нескольких — например, для общего рабочего места в учительской. По привязанным сотрудникам определяются классное руководство и преподаваемые предметы."), staffBox),
+          h("div", { class: "hint" }, "При первом входе пользователь обязан сменить пароль.")),
+          [{ text: "Сохранить", cls: "pri", fn: async function () {
+            var v = f.values();
+            v.staff_ids = Array.prototype.map.call(staffBox.querySelectorAll("input:checked"), function (i) { return +i.value; });
+            if (u) await PUT("/api/users/" + u.id, v); else await POST("/api/users", v); route();
+          } }].concat(u ? [{ text: "Удалить", cls: "danger", fn: async function () { if (!confirmBox("Удалить пользователя?")) return false; await DEL("/api/users/" + u.id); route(); } }] : []));
       };
       $main.appendChild(h("div", { class: "bar" }, h("button", { class: "pri", onclick: function () { dlg(null); } }, "+ Пользователь"),
-        h("button", { onclick: safe(async function () {
-          var created = 0;
-          for (var i = 0; i < staff.length; i++) {
-            var s = staff[i];
-            if (!s.active || users.some(function (u) { return u.staff_id === s.id; })) continue;
-            var login = translit(s.last_name + (s.first_name ? s.first_name[0] : ""));
-            try { await POST("/api/users", { login: login, password: "school" + (100 + s.id), full_name: s.short, role: "teacher", staff_id: s.id }); created++; } catch (e) { }
-          }
-          toast("Создано учётных записей: " + created + ". Начальный пароль: school + (100 + № сотрудника), напр. school101 — сообщите его лично."); route();
-        }) }, "Создать учётные записи для всех сотрудников")));
-      $main.appendChild(h("div", { class: "tw" }, h("table", { class: "t" }, h("thead", null, h("tr", null, ["Логин", "Имя", "Роль", "Сотрудник", "Статус"].map(function (x) { return h("th", null, x); }))),
+        h("button", { onclick: function () {
+          var login = h("input", { value: "uchitelskaya" }), pw = h("input", { value: "", placeholder: "задайте пароль" });
+          modal("Учётная запись для учительской", h("div", null,
+            h("p", null, "Общий аккаунт для одного ПК в учительской: заполняет отметки за четверть, год, экзамен и итоговые и поведение по ", h("b", null, "всем классам"), ", но не может менять списки учащихся и предметы."),
+            h("div", { class: "form" }, field("Логин", login), field("Пароль", pw))),
+            [{ text: "Создать", cls: "pri", fn: async function () {
+              if ((pw.value || "").length < 6) { toast("Пароль не короче 6 символов", true); return false; }
+              await POST("/api/users", { login: login.value, password: pw.value, full_name: "Учительская", role: "workspace" });
+              toast("Создан аккаунт «Учительская»"); route();
+            } }]);
+        } }, "+ Аккаунт «Учительская»")));
+      $main.appendChild(h("div", { class: "tw" }, h("table", { class: "t" }, h("thead", null, h("tr", null, ["Логин", "Имя", "Роль", "Сотрудники", "Статус"].map(function (x) { return h("th", null, x); }))),
         h("tbody", null, users.map(function (u) {
-          var st = staff.filter(function (s) { return s.id === u.staff_id; })[0];
-          return h("tr", { class: u.active ? "" : "muted" }, h("td", null, h("a", { href: "javascript:void 0", onclick: function () { dlg(u); } }, u.login)), h("td", null, u.full_name), h("td", null, S.me.roles[u.role]), h("td", null, st ? st.short : ""),
+          var names = (u.staff_ids || []).map(function (id) { var s = staff.filter(function (x) { return x.id === id; })[0]; return s ? s.short : ""; }).filter(Boolean).join(", ");
+          return h("tr", { class: u.active ? "" : "muted" }, h("td", null, h("a", { href: "javascript:void 0", onclick: function () { dlg(u); } }, u.login)), h("td", null, u.full_name), h("td", null, S.me.roles[u.role]), h("td", null, names),
             h("td", null, (u.active ? "активен" : "отключён") + (u.must_change ? " · ждёт смены пароля" : "")));
         })))));
-      $main.appendChild(h("div", { class: "hint" }, "Роли: администратор — всё, включая пользователей и резервные копии; директор/заместитель — все данные и отчёты, закрытие периодов; классный руководитель — свой класс (учащиеся, поведение) и свои предметы; учитель — свои журналы; только просмотр — отчёты."));
+      $main.appendChild(h("div", { class: "hint" }, "Роли: администратор — всё; директор/заместитель — все данные, отчёты, закрытие периодов; учительская (общий доступ) — отметки за периоды и поведение по всем классам, без изменения списков и предметов; классный руководитель — свой класс и свои предметы; учитель — свои журналы; только просмотр — отчёты."));
+    } else if (tab === "fields") {
+      $main.appendChild(h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Тип организации"),
+        h("div", { class: "bar" },
+          (function () { var s = sel(S.me.org_types.map(function (o) { return [o.code, o.name]; }), S.me.org_type);
+            return h("span", null, s, " ", h("button", { class: "pri", onclick: safe(async function () {
+              if (!confirmBox("Изменить тип организации на «" + s.options[s.selectedIndex].text + "»?")) return;
+              await PUT("/api/org_type", { org_type: s.value }); S.me = await GET("/api/me"); renderShell(); route();
+            }) }, "Сохранить тип")); })()),
+        h("div", { class: "hint" }, "От типа зависит набор предметов типового плана и, для отдела образования, особый режим (только своды по школам).")));
+      var hf = S.me.hidden_fields, labels = fieldLabels();
+      function hideCard(table, title) {
+        var box = h("div", { style: { columns: "3" } }, S.me.hideable[table].map(function (fk) {
+          return h("label", { style: { display: "block" } }, h("input", { type: "checkbox", value: fk, checked: hf[table].indexOf(fk) >= 0 }), " " + (labels[fk] || fk));
+        }));
+        return h("div", { class: "card" }, h("h3", { style: { marginTop: 0 } }, title), box,
+          h("div", { class: "bar", style: { marginTop: "8px" } }, h("button", { class: "pri", onclick: safe(async function () {
+            var sel2 = Array.prototype.map.call(box.querySelectorAll("input:checked"), function (i) { return i.value; });
+            var payload = {}; payload[table] = sel2;
+            S.me.hidden_fields = await PUT("/api/hidden_fields", payload); toast("Сохранено");
+          }) }, "Сохранить")));
+      }
+      $main.appendChild(h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Скрытие ненужных полей"),
+        h("div", { class: "hint" }, "Отмеченные поля убираются из карточек учащихся и сотрудников: их не видят и не заполняют другие пользователи. Фамилия скрыта быть не может.")));
+      $main.appendChild(hideCard("students", "Поля учащихся"));
+      $main.appendChild(hideCard("staff", "Поля сотрудников"));
+    } else if (tab === "transfer") {
+      $main.appendChild(h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Перенос всех настроек и оценок на другой сервер"),
+        h("p", null, "Экспорт — один файл .sgdb со всеми данными (пароли — необратимый хэш, персональные данные зашифрованы). Импорт заменяет текущую базу (перед этим создаётся резервная копия)."),
+        h("div", { class: "bar" },
+          h("button", { class: "pri", onclick: function () { download("/api/export/full"); } }, "Экспорт всех данных (.sgdb)"),
+          h("button", { onclick: safe(async function () {
+            var fs = await pickFile(".sgdb,.db"); if (!fs.length) return;
+            if (!confirmBox("Импортировать данные из файла " + fs[0].name + "? Текущая база будет заменена.")) return;
+            await POST("/api/backups/restore", { data: await fileToB64(fs[0]) }); toast("Данные импортированы"); boot();
+          }) }, "Импорт данных…")),
+        h("div", { class: "hint" }, "Файл .sgdb читается только программой SchoolGrade той же или новой версии.")));
     } else if (tab === "rules") {
       var on = journalOn();
       $main.appendChild(h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Режим работы"),
@@ -1167,6 +1322,23 @@
   function translit(s) {
     var m = { а: "a", б: "b", в: "v", г: "g", д: "d", е: "e", ё: "e", ж: "zh", з: "z", и: "i", й: "y", к: "k", л: "l", м: "m", н: "n", о: "o", п: "p", р: "r", с: "s", т: "t", у: "u", ф: "f", х: "h", ц: "ts", ч: "ch", ш: "sh", щ: "sch", ъ: "", ы: "y", ь: "", э: "e", ю: "yu", я: "ya", і: "i", ў: "u" };
     return s.toLowerCase().split("").map(function (c) { return m[c] !== undefined ? m[c] : (/[a-z0-9]/.test(c) ? c : ""); }).join("");
+  }
+  function fieldLabels() {
+    return {
+      first_name: "Имя", middle_name: "Отчество", gender: "Пол", birth_date: "Дата рождения",
+      personal_no: "Идентификационный номер", address: "Адрес проживания", phone: "Телефон",
+      arrived_from: "Откуда прибыл", study_form: "Форма получения образования", health_group: "Группа здоровья",
+      pe_group: "Группа по физкультуре", language1: "Язык обучения", foreign1: "Иностранный язык 1",
+      foreign2: "Иностранный язык 2", family_type: "Семья", parents: "Законные представители",
+      parents_phone: "Телефоны законных представителей", social: "Социальный статус", hobbies: "Увлечения", note: "Примечание",
+      position: "Должность", education: "Образование", category: "Квалификационная категория", degree: "Учёная степень",
+      title: "Почётное звание", hire_date: "Дата приёма", email: "Эл. почта", pc_skill: "Владение ПК", subjects_text: "Преподаваемые предметы"
+    };
+  }
+  function visibleForm(fields) {
+    var hidden = (S.me.hidden_fields || {});
+    var hs = (hidden.students || []).concat(hidden.staff || []);
+    return fields.filter(function (d) { return hs.indexOf(d.k) < 0; });
   }
 
   // ===================================================================== о программе

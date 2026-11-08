@@ -22,6 +22,13 @@ def fem(last):
 def fill(db, seed=7):
     rnd = random.Random(seed)
     today = datetime.date.today()
+    if not db.get_setting("org_type"):
+        db.set_setting("org_type", "secondary")
+    if db.val("SELECT COUNT(*) FROM subjects") == 0:
+        from .db import DEFAULT_SUBJECTS, SUBJECT_SHORT
+        for i, name in enumerate(DEFAULT_SUBJECTS):
+            db.ex("INSERT INTO subjects(name,short,sort,category) VALUES(?,?,?,'subject')",
+                  (name, SUBJECT_SHORT.get(name, ""), (i + 1) * 10))
     start = today.year if today.month >= 9 else today.year - 1
     y = db.one("SELECT * FROM years WHERE name=?", ("%d/%d" % (start, start + 1),))
     if not y:

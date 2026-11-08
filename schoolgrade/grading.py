@@ -24,9 +24,19 @@ EXEMPT = "осв."       # освобождён
 NOT_ATT = "н/а"       # не аттестован
 NOT_STUDIED = "н/и"   # не изучал
 ABSENT = "н"          # отсутствовал на уроке (только в текущем журнале)
+LEFT = "выб"          # выбыл (для факультативов и объединений по интересам)
 
 SPECIAL_FINAL = [PASS, FAIL, EXEMPT, NOT_ATT, NOT_STUDIED]
 SPECIAL_CURRENT = [ABSENT, PASS, FAIL, EXEMPT]
+ATTEND_VALUES = [ABSENT, LEFT]   # факультативы/объединения: только посещение
+
+# Категории предметов
+CAT_SUBJECT = "subject"   # учебный предмет (идёт в отметки и отчёты)
+CAT_FZ = "fz"             # факультативное занятие (ФЗ) — только посещение
+CAT_OPI = "opi"           # объединение по интересам (кружок, секция, студия) — только посещение
+CATEGORIES = {CAT_SUBJECT: "Учебный предмет", CAT_FZ: "Факультатив (ФЗ)",
+              CAT_OPI: "Объединение по интересам (ОпИ)"}
+ATTEND_CATEGORIES = (CAT_FZ, CAT_OPI)
 
 BEHAVIOR = ["прим.", "уд.", "неуд."]
 BEHAVIOR_FULL = {"прим.": "примерное", "уд.": "удовлетворительное",
@@ -40,6 +50,7 @@ ALIASES = {
     "н/а": NOT_ATT, "на": NOT_ATT, "н.а": NOT_ATT, "н/а.": NOT_ATT, "неаттестован": NOT_ATT,
     "н/и": NOT_STUDIED, "ни": NOT_STUDIED, "н.и": NOT_STUDIED, "не изучал": NOT_STUDIED,
     "н": ABSENT, "y": ABSENT, "n": ABSENT,
+    "выб": LEFT, "выбыл": LEFT, "в": LEFT,
     "прим": "прим.", "примерное": "прим.", "п": "прим.",
     "уд": "уд.", "удовлетворительное": "уд.",
     "неуд": "неуд.", "неудовлетворительное": "неуд.",
@@ -81,6 +92,11 @@ def normalize(value, kind="final"):
         if v in BEHAVIOR:
             return v
         raise ValueError("Поведение: допустимо «прим.», «уд.», «неуд.»")
+    if kind == "attend":
+        canon = ALIASES.get(v, ALIASES.get(v.rstrip("."), v))
+        if canon in ATTEND_VALUES:
+            return canon
+        raise ValueError("Факультатив/объединение: допустимо «н» (не был) или «выб» (выбыл)")
     if v.isdigit() and 1 <= int(v) <= 10:
         return str(int(v))
     canon = ALIASES.get(v, ALIASES.get(v.rstrip("."), v))

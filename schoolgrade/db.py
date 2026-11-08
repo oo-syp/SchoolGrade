@@ -10,7 +10,7 @@ import sqlite3
 import threading
 import time
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
@@ -57,7 +57,14 @@ CREATE TABLE IF NOT EXISTS periods (
 CREATE TABLE IF NOT EXISTS subjects (
     id INTEGER PRIMARY KEY, name TEXT NOT NULL, short TEXT DEFAULT '',
     sort INTEGER NOT NULL DEFAULT 100, eval_type TEXT NOT NULL DEFAULT 'points',
+    category TEXT NOT NULL DEFAULT 'subject',
     active INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS user_staff (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    staff_id INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+    PRIMARY KEY(user_id, staff_id)
 );
 
 CREATE TABLE IF NOT EXISTS classes (
@@ -145,6 +152,12 @@ CREATE TABLE IF NOT EXISTS audit (
     user_id INTEGER, login TEXT, ip TEXT, action TEXT, details TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_audit_ts ON audit(ts);
+
+CREATE TABLE IF NOT EXISTS dep_packages (
+    id INTEGER PRIMARY KEY, school TEXT DEFAULT '', year TEXT DEFAULT '',
+    filename TEXT DEFAULT '', data TEXT NOT NULL,
+    uploaded_at TEXT DEFAULT (datetime('now','localtime'))
+);
 """
 
 DEFAULT_SUBJECTS = [
@@ -181,9 +194,56 @@ class Database(object):
         self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.execute("PRAGMA synchronous = NORMAL")
         with self.lock:
+            meta_exists = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone() is not None
+            had_schema = meta_exists and self.conn.execute(
+                "SELECT 1 FROM meta WHERE key='schema'").fetchone() is not None
             self.conn.executescript(SCHEMA)
-            self.conn.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('schema',?)", (str(SCHEMA_VERSION),))
+            if not had_schema:
+                self.conn.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('schema',?)", (str(SCHEMA_VERSION),))
+            self._migrate()
         self.is_new = new
+
+    def _migrate(self):
+        """Автоматически привести базу прежней версии к текущей схеме,
+        сохранив все данные. Запускается при каждом открытии базы."""
+        cur = int(self.conn.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0])
+        if cur >= SCHEMA_VERSION:
+            return
+
+        def has_col(table, col):
+            return any(r[1] == col for r in self.conn.execute("PRAGMA table_info(%s)" % table))
+
+        # --- версия 1 -> 2 ---
+        if cur < 2:
+            if not has_col("subjects", "category"):
+                self.conn.execute("ALTER TABLE subjects ADD COLUMN category TEXT NOT NULL DEFAULT 'subject'")
+            self.conn.execute("CREATE TABLE IF NOT EXISTS user_staff ("
+                              "user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, "
+                              "staff_id INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE, "
+                              "PRIMARY KEY(user_id, staff_id))")
+            # перенести привязку staff_id из users в user_staff
+            for u in self.conn.execute("SELECT id, staff_id FROM users WHERE staff_id IS NOT NULL").fetchall():
+                self.conn.execute("INSERT OR IGNORE INTO user_staff(user_id,staff_id) VALUES(?,?)", (u[0], u[1]))
+            # обфускация существующих персональных данных
+            try:
+                from . import crypto
+                for table in ("students", "staff"):
+                    cols = crypto.SENSITIVE[table]
+                    rows = self.conn.execute("SELECT id, %s FROM %s" % (",".join(cols), table)).fetchall()
+                    for r in rows:
+                        upd = {}
+                        for i, c in enumerate(cols):
+                            v = r[i + 1]
+                            if v not in (None, "") and not crypto.is_encrypted(v):
+                                upd[c] = crypto.encrypt(v)
+                        if upd:
+                            self.conn.execute("UPDATE %s SET %s WHERE id=?" % (table, ",".join(k + "=?" for k in upd)),
+                                              list(upd.values()) + [r[0]])
+            except Exception as e:  # noqa
+                import sys
+                sys.stderr.write("Обфускация при миграции пропущена: %s\n" % e)
+            self.conn.execute("UPDATE meta SET value='2' WHERE key='schema'")
 
     # ------------------------------------------------------------ helpers
     def q(self, sql, args=()):

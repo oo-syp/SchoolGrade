@@ -72,9 +72,12 @@ def save_config(data_dir, cfg):
 def init_app(data_dir, verbose=False):
     db = Database(os.path.join(data_dir, "schoolgrade.db"))
     auth.ensure_admin(db)
-    if db.val("SELECT COUNT(*) FROM subjects") == 0:
+    if db.val("SELECT COUNT(*) FROM subjects") == 0 and db.get_setting("org_type"):
+        # предметы заводятся после выбора типа организации (api_org_type_put),
+        # но если тип уже выбран, а предметов нет — наполнить базовым набором
         for i, name in enumerate(DEFAULT_SUBJECTS):
-            db.ex("INSERT INTO subjects(name,short,sort) VALUES(?,?,?)", (name, SUBJECT_SHORT.get(name, ""), (i + 1) * 10))
+            db.ex("INSERT INTO subjects(name,short,sort,category) VALUES(?,?,?,'subject')",
+                  (name, SUBJECT_SHORT.get(name, ""), (i + 1) * 10))
     app = api.App(db, data_dir, resource_dir(), verbose)
     api.APP["app"] = app
     return app
@@ -164,7 +167,19 @@ def run_gui(app, srv, cfg):
     root.mainloop()
 
 
+def _safe_streams():
+    """Вывод в консоль не должен ронять сервер: на Windows с некириллической
+    кодовой страницей (или при перенаправлении в файл) print() с русским
+    текстом вызывал UnicodeEncodeError."""
+    for s in (sys.stdout, sys.stderr):
+        try:
+            s.reconfigure(errors="replace")
+        except Exception:
+            pass
+
+
 def main(argv=None):
+    _safe_streams()
     ap = argparse.ArgumentParser(prog=APP_NAME)
     ap.add_argument("--port", type=int)
     ap.add_argument("--data")

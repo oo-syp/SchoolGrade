@@ -1,19 +1,19 @@
 # UTF-8
 # Свойства exe-файла (вкладка «Подробно» в проводнике Windows)
 VSVersionInfo(
-  ffi=FixedFileInfo(filevers=(1, 0, 0, 0), prodvers=(1, 0, 0, 0), mask=0x3f, flags=0x0, OS=0x40004,
+  ffi=FixedFileInfo(filevers=(1, 1, 0, 0), prodvers=(1, 1, 0, 0), mask=0x3f, flags=0x0, OS=0x40004,
                     fileType=0x1, subtype=0x0, date=(0, 0)),
   kids=[
     StringFileInfo([
       StringTable('041904B0', [
         StringStruct('CompanyName', 'Общественная организация «Союз юных педагогов»'),
         StringStruct('FileDescription', 'SchoolGrade — учёт результатов учебной деятельности учащихся'),
-        StringStruct('FileVersion', '1.0.0'),
+        StringStruct('FileVersion', '1.1.0'),
         StringStruct('InternalName', 'SchoolGrade'),
         StringStruct('LegalCopyright', '© 2026 ОО «Союз юных педагогов». Разработчик: Костянко Денис Александрович, Витебск'),
         StringStruct('OriginalFilename', 'SchoolGrade.exe'),
         StringStruct('ProductName', 'SchoolGrade'),
-        StringStruct('ProductVersion', '1.0.0')])
+        StringStruct('ProductVersion', '1.1.0')])
     ]),
     VarFileInfo([VarStruct('Translation', [0x0419, 1200])])
   ]

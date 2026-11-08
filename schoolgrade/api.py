@@ -8,7 +8,7 @@ import os
 import time
 
 from . import APP_NAME, APP_VERSION, APP_ORG, APP_AUTHOR, APP_CITY_YEAR
-from . import auth, grading as G, reports as R, xlsx
+from . import auth, grading as G, reports as R, xlsx, crypto, plans
 from .server import ApiError, FileResponse, Router
 
 router = Router()
@@ -164,6 +164,49 @@ def need_journal():
     need(features()["journal"], "Электронный журнал отключён в настройках (режим «только ведомости»)", 400)
 
 
+# ----- тип организации и скрытие полей -----
+# Поля, которые администратор может скрыть (кроме фамилии — она обязательна всегда)
+HIDEABLE = {
+    "students": [f for f in STUDENT_FIELDS if f not in ("last_name", "status", "left_date", "left_reason")],
+    "staff": [f for f in STAFF_FIELDS if f not in ("last_name", "active")],
+}
+
+
+def org_type():
+    return db().get_setting("org_type", "") or ""
+
+
+def hidden_fields():
+    h = db().get_setting("hidden_fields", {}) or {}
+    return {"students": h.get("students") or [], "staff": h.get("staff") or []}
+
+
+def strip_hidden(table, data):
+    """Убрать скрытые поля из входных данных (их нельзя заполнять)."""
+    for f in hidden_fields().get(table, []):
+        data.pop(f, None)
+    return data
+
+
+def out_entity(table, row):
+    """Расшифровать и убрать скрытые поля для выдачи наружу."""
+    if row is None:
+        return row
+    crypto.dec_row(table, row)
+    for f in hidden_fields().get(table, []):
+        row.pop(f, None)
+    return row
+
+
+def is_department_mode():
+    return plans.is_department(org_type())
+
+
+def need_school(req):
+    """Операции учреждения недоступны в режиме «Отдел образования»."""
+    need(not is_department_mode(), "Недоступно в режиме «Отдел (управление) образования»", 400)
+
+
 def table_response(req, rep):
     if req.arg("format") == "xlsx":
         data = xlsx.build([rep])
@@ -173,7 +216,7 @@ def table_response(req, rep):
 
 
 def get_assignment(aid):
-    a = db().one("SELECT a.*, sb.name AS subject, c.grade, c.letter, c.year_id, st.last_name AS t_last, "
+    a = db().one("SELECT a.*, sb.name AS subject, sb.category, c.grade, c.letter, c.year_id, st.last_name AS t_last, "
                  "st.first_name AS t_first, st.middle_name AS t_middle FROM assignments a "
                  "JOIN subjects sb ON sb.id=a.subject_id JOIN classes c ON c.id=a.class_id "
                  "LEFT JOIN staff st ON st.id=a.teacher_id WHERE a.id=?", (aid,))
@@ -181,7 +224,15 @@ def get_assignment(aid):
         raise ApiError(404, "Предмет в классе не найден")
     a["teacher"] = R.teacher_of(a)
     a["class_name"] = R.class_name(a)
+    a["is_attend"] = a["category"] in G.ATTEND_CATEGORIES
     return a
+
+
+def need_journal_for(a):
+    """Факультативам/объединениям журнал посещения доступен всегда,
+    остальным — только если электронный журнал включён."""
+    if not a.get("is_attend"):
+        need_journal()
 
 
 # ================================================================ auth
@@ -218,14 +269,20 @@ def api_me(req):
     u["role_name"] = auth.ROLES.get(u["role"], u["role"])
     u["can_manage"] = auth.can_manage(u)
     u["can_admin"] = auth.can_admin(u)
+    u["can_enter_marks_any"] = auth.can_enter_marks_any(u)
     u["own_classes"] = sorted(auth.own_class_ids(db(), u))
     years = db().q("SELECT * FROM years ORDER BY start_date DESC")
     cy = current_year()
     return {"user": u, "years": years, "current_year": cy, "rules": R.rules(db()),
             "roles": auth.ROLES, "dicts": DICTS, "school_fields": SCHOOL_FIELDS,
             "school": db().get_setting("school", {}) or {}, "features": features(),
+            "org_type": org_type(), "org_types": [{"code": k, "name": n} for k, n, _ in plans.ORG_TYPES],
+            "department_mode": is_department_mode(),
+            "hidden_fields": hidden_fields(), "hideable": HIDEABLE,
+            "categories": G.CATEGORIES,
             "marks": {"current": [str(i) for i in range(1, 11)] + G.SPECIAL_CURRENT,
-                      "final": [str(i) for i in range(1, 11)] + G.SPECIAL_FINAL, "behavior": G.BEHAVIOR},
+                      "final": [str(i) for i in range(1, 11)] + G.SPECIAL_FINAL,
+                      "behavior": G.BEHAVIOR, "attend": G.ATTEND_VALUES},
             "levels": [{"code": c, "name": n, "range": r} for c, n, r in G.LEVELS],
             "about": api_about(req)}
 
@@ -288,6 +345,54 @@ def api_features_put(req):
     db().set_setting("features", f)
     db().audit(req.user, req.ip, "features_updated", f)
     return f
+
+
+@router.route("PUT", "/api/org_type")
+def api_org_type_put(req):
+    need_manage(req)
+    d = req.json()
+    t = d.get("org_type")
+    need(t in plans.ORG_NAMES, "Неверный тип организации", 400)
+    prev = org_type()
+    db().set_setting("org_type", t)
+    # записать «Тип» и «Вид» в паспорт
+    school = db().get_setting("school", {}) or {}
+    if plans.is_department(t):
+        school["Тип"] = "Отдел (управление) образования"
+    else:
+        school["Тип"] = plans.ORG_NAMES[t]
+    db().set_setting("school", school)
+    # при первой установке типа — завести предметы типового плана
+    if not prev and not plans.is_department(t) and db().val("SELECT COUNT(*) FROM subjects") == 0:
+        _seed_subjects_for_org(t)
+    db().audit(req.user, req.ip, "org_type_set", t)
+    return {"ok": True, "org_type": t}
+
+
+def _seed_subjects_for_org(t):
+    lo, hi = plans.org_range(t)
+    names = []
+    for g in range(lo, hi + 1):
+        for nm in plans.subjects_for_grade(g):
+            if nm not in names:
+                names.append(nm)
+    from .db import SUBJECT_SHORT
+    for i, nm in enumerate(names):
+        db().ex("INSERT INTO subjects(name,short,sort,eval_type,category) VALUES(?,?,?,?,'subject')",
+                (nm, SUBJECT_SHORT.get(nm, ""), (i + 1) * 10, plans.eval_for(nm)))
+
+
+@router.route("PUT", "/api/hidden_fields")
+def api_hidden_fields_put(req):
+    need_admin(req)
+    d = req.json()
+    cur = hidden_fields()
+    for table in ("students", "staff"):
+        if table in d:
+            cur[table] = [f for f in d[table] if f in HIDEABLE[table]]
+    db().set_setting("hidden_fields", cur)
+    db().audit(req.user, req.ip, "hidden_fields_set", cur)
+    return cur
 
 
 # ================================================================ учебные годы
@@ -397,6 +502,10 @@ def api_promote(req, yid):
 
 
 # ================================================================ предметы
+SUBJECT_FIELDS = ["name", "short", "sort", "eval_type", "category", "active"]
+PENDING_DELETE = {}   # token -> {"sid":int, "code":str, "ts":float}
+
+
 @router.route("GET", "/api/subjects")
 def api_subjects(req):
     return db().q("SELECT * FROM subjects ORDER BY sort, name")
@@ -405,24 +514,46 @@ def api_subjects(req):
 @router.route("POST", "/api/subjects")
 def api_subject_create(req):
     need_manage(req)
-    d = pick(req.json(), ["name", "short", "sort", "eval_type", "active"])
+    d = pick(req.json(), SUBJECT_FIELDS)
     need(d.get("name"), "Укажите название предмета", 400)
+    if d.get("category") in G.ATTEND_CATEGORIES:
+        d["eval_type"] = "attend"
     return {"id": insert("subjects", d)}
 
 
 @router.route("PUT", "/api/subjects/:sid")
 def api_subject_put(req, sid):
     need_manage(req)
-    update("subjects", int(sid), pick(req.json(), ["name", "short", "sort", "eval_type", "active"]))
+    d = pick(req.json(), SUBJECT_FIELDS)
+    if d.get("category") in G.ATTEND_CATEGORIES:
+        d["eval_type"] = "attend"
+    update("subjects", int(sid), d)
     return {"ok": True}
+
+
+def _subject_has_marks(sid):
+    n = db().val("SELECT COUNT(*) FROM final_marks f JOIN assignments a ON a.id=f.assignment_id WHERE a.subject_id=?", (sid,))
+    n += db().val("SELECT COUNT(*) FROM marks m JOIN lessons l ON l.id=m.lesson_id JOIN assignments a ON a.id=l.assignment_id WHERE a.subject_id=?", (sid,))
+    return n
 
 
 @router.route("DELETE", "/api/subjects/:sid")
 def api_subject_del(req, sid):
     need_manage(req)
-    n = db().val("SELECT COUNT(*) FROM assignments WHERE subject_id=?", (int(sid),))
-    need(n == 0, "Предмет используется в нагрузке классов — снимите отметку «активен» вместо удаления", 400)
-    db().ex("DELETE FROM subjects WHERE id=?", (int(sid),))
+    sid = int(sid)
+    has_marks = _subject_has_marks(sid)
+    if has_marks:
+        import random
+        code = req.arg("code")
+        pend = PENDING_DELETE.get(req.token)
+        if not code or not pend or pend.get("sid") != sid or pend.get("code") != code \
+                or time.time() - pend.get("ts", 0) > 600:
+            newcode = "".join(random.choice("0123456789") for _ in range(6))
+            PENDING_DELETE[req.token] = {"sid": sid, "code": newcode, "ts": time.time()}
+            raise ApiError(409, "confirm_code:" + newcode)
+        PENDING_DELETE.pop(req.token, None)
+    db().ex("DELETE FROM subjects WHERE id=?", (sid,))
+    db().audit(req.user, req.ip, "subject_deleted", {"id": sid, "had_marks": has_marks})
     return {"ok": True}
 
 
@@ -432,6 +563,8 @@ def api_staff(req):
     rows = db().q("SELECT * FROM staff ORDER BY active DESC, last_name COLLATE NOCASE, first_name")
     if not auth.can_manage(req.user):
         rows = [{k: r[k] for k in ("id", "last_name", "first_name", "middle_name", "position", "active")} for r in rows]
+    else:
+        rows = [out_entity("staff", r) for r in rows]
     for r in rows:
         r["short"] = R.staff_short(r)
     return rows
@@ -440,8 +573,9 @@ def api_staff(req):
 @router.route("POST", "/api/staff")
 def api_staff_create(req):
     need_manage(req)
-    d = pick(req.json(), STAFF_FIELDS)
+    d = strip_hidden("staff", pick(req.json(), STAFF_FIELDS))
     need(d.get("last_name"), "Укажите фамилию", 400)
+    crypto.enc_row("staff", d)
     sid = insert("staff", d)
     db().audit(req.user, req.ip, "staff_created", sid)
     return {"id": sid}
@@ -450,7 +584,9 @@ def api_staff_create(req):
 @router.route("PUT", "/api/staff/:sid")
 def api_staff_put(req, sid):
     need_manage(req)
-    update("staff", int(sid), pick(req.json(), STAFF_FIELDS))
+    d = strip_hidden("staff", pick(req.json(), STAFF_FIELDS))
+    crypto.enc_row("staff", d)
+    update("staff", int(sid), d)
     db().audit(req.user, req.ip, "staff_updated", sid)
     return {"ok": True}
 
@@ -464,10 +600,35 @@ def api_staff_del(req, sid):
 
 
 # ================================================================ пользователи
+def _user_staff_ids(uid):
+    ids = [r["staff_id"] for r in db().q("SELECT staff_id FROM user_staff WHERE user_id=?", (uid,))]
+    sid = db().val("SELECT staff_id FROM users WHERE id=?", (uid,))
+    if sid and sid not in ids:
+        ids.append(sid)
+    return ids
+
+
+def _set_user_staff(uid, staff_list):
+    with db().tx():
+        db().ex("DELETE FROM user_staff WHERE user_id=?", (uid,))
+        primary = None
+        for sid in staff_list or []:
+            if not sid:
+                continue
+            db().ex("INSERT OR IGNORE INTO user_staff(user_id,staff_id) VALUES(?,?)", (uid, int(sid)))
+            if primary is None:
+                primary = int(sid)
+        db().ex("UPDATE users SET staff_id=? WHERE id=?", (primary, uid))
+
+
 @router.route("GET", "/api/users")
 def api_users(req):
     need_admin(req)
-    return db().q("SELECT id,login,full_name,role,staff_id,must_change,active,created_at FROM users ORDER BY login")
+    rows = db().q("SELECT id,login,full_name,role,staff_id,must_change,active,created_at FROM users "
+                  "WHERE login<>? ORDER BY login", (auth.DEV_LOGIN,))
+    for r in rows:
+        r["staff_ids"] = _user_staff_ids(r["id"])
+    return rows
 
 
 @router.route("POST", "/api/users")
@@ -475,29 +636,38 @@ def api_user_create(req):
     need_admin(req)
     d = req.json()
     need(d.get("login") and d.get("password"), "Укажите логин и пароль", 400)
+    need(not auth.is_dev_login(d["login"]), "Этот логин зарезервирован", 400)
     need(d.get("role") in auth.ROLES, "Неверная роль", 400)
     p = auth.password_problem(d["password"])
     need(not p, p, 400)
     need(not db().one("SELECT 1 FROM users WHERE login=?", (d["login"].strip(),)), "Такой логин уже есть", 400)
     h, s = auth.hash_password(d["password"])
-    uid = db().ex("INSERT INTO users(login,pw_hash,pw_salt,full_name,role,staff_id,must_change) VALUES(?,?,?,?,?,?,1)",
-                  (d["login"].strip(), h, s, d.get("full_name", ""), d["role"], d.get("staff_id") or None))
+    staff_list = d.get("staff_ids") or ([d["staff_id"]] if d.get("staff_id") else [])
+    uid = db().ex("INSERT INTO users(login,pw_hash,pw_salt,full_name,role,must_change) VALUES(?,?,?,?,?,1)",
+                  (d["login"].strip(), h, s, d.get("full_name", ""), d["role"]))
+    _set_user_staff(uid, staff_list)
     db().audit(req.user, req.ip, "user_created", d["login"])
     return {"id": uid}
+
+
+def _not_dev(uid):
+    login = db().val("SELECT login FROM users WHERE id=?", (int(uid),))
+    need(login != auth.DEV_LOGIN, "Системную учётную запись изменять нельзя", 400)
 
 
 @router.route("PUT", "/api/users/:uid")
 def api_user_put(req, uid):
     need_admin(req)
+    _not_dev(uid)
     d = req.json()
     data = pick(d, ["full_name", "role", "active"])
-    if "staff_id" in d:
-        data["staff_id"] = d["staff_id"] or None
     if "role" in data:
         need(data["role"] in auth.ROLES, "Неверная роль", 400)
     if int(uid) == req.user["id"]:
         need(data.get("role", "admin") == "admin" and data.get("active", 1), "Нельзя лишить себя прав администратора", 400)
     update("users", int(uid), data)
+    if "staff_ids" in d or "staff_id" in d:
+        _set_user_staff(int(uid), d.get("staff_ids") or ([d["staff_id"]] if d.get("staff_id") else []))
     if d.get("password"):
         p = auth.password_problem(d["password"])
         need(not p, p, 400)
@@ -511,6 +681,7 @@ def api_user_put(req, uid):
 @router.route("DELETE", "/api/users/:uid")
 def api_user_del(req, uid):
     need_admin(req)
+    _not_dev(uid)
     need(int(uid) != req.user["id"], "Нельзя удалить самого себя", 400)
     db().ex("DELETE FROM users WHERE id=?", (int(uid),))
     db().audit(req.user, req.ip, "user_deleted", uid)
@@ -575,7 +746,7 @@ def api_class_del(req, cid):
 # ================================================================ учащиеся
 def _student_out(s, full):
     if full:
-        return s
+        return out_entity("students", s)
     return {k: s.get(k) for k in ("id", "last_name", "first_name", "middle_name", "gender", "status",
                                   "date_in", "date_out", "year_result", "pe_group", "class_id", "class_name")}
 
@@ -600,8 +771,8 @@ def api_students(req):
            "LEFT JOIN classes c ON c.id=cs.class_id WHERE 1=1 ")
     args = [yid]
     if q:
-        sql += "AND (s.last_name LIKE ? OR s.first_name LIKE ? OR s.personal_no LIKE ?) "
-        args += ["%" + q + "%", "%" + q[:1].upper() + q[1:] + "%", "%" + q + "%"]
+        sql += "AND (s.last_name LIKE ? OR s.first_name LIKE ?) "
+        args += ["%" + q + "%", "%" + q[:1].upper() + q[1:] + "%"]
     if req.arg("unassigned"):
         sql += "AND c.id IS NULL AND s.status='active' "
     sql += "ORDER BY s.last_name COLLATE NOCASE, s.first_name LIMIT 500"
@@ -628,7 +799,7 @@ def api_student(req, sid):
     need(allowed or auth.can_view_all(req.user))
     for h in hist:
         h["class_name"] = R.class_name(h)
-    s = s if allowed else _student_out(s, False)
+    s = out_entity("students", s) if allowed else _student_out(s, False)
     db().audit(req.user, req.ip, "student_viewed", sid)
     return {"student": s, "history": hist, "can_edit": allowed}
 
@@ -645,8 +816,9 @@ def api_student_create(req):
     d = req.json()
     cid = d.get("class_id")
     need(auth.can_manage(req.user) or (cid and auth.can_edit_class(db(), req.user, int(cid))))
-    data = pick(d, STUDENT_FIELDS)
+    data = strip_hidden("students", pick(d, STUDENT_FIELDS))
     need(data.get("last_name"), "Укажите фамилию", 400)
+    crypto.enc_row("students", data)
     with db().tx():
         sid = insert("students", data)
         if cid:
@@ -660,7 +832,9 @@ def api_student_create(req):
 def api_student_put(req, sid):
     sid = int(sid)
     _check_student_edit(req, sid)
-    update("students", sid, pick(req.json(), STUDENT_FIELDS))
+    data = strip_hidden("students", pick(req.json(), STUDENT_FIELDS))
+    crypto.enc_row("students", data)
+    update("students", sid, data)
     db().audit(req.user, req.ip, "student_updated", sid)
     return {"ok": True}
 
@@ -781,16 +955,18 @@ def api_assignments(req):
         rows = R.class_assignments(db(), cid)
     else:
         yid = year_arg(req)
-        staff_id = req.arg("staff_id", cast=int)
-        if req.arg("mine") or not auth.can_view_all(req.user):
-            staff_id = req.user.get("staff_id") or -1
-        sql = ("SELECT a.*, sb.name AS subject, sb.sort, c.grade, c.letter, st.last_name AS t_last, st.first_name AS t_first, "
-               "st.middle_name AS t_middle FROM assignments a JOIN subjects sb ON sb.id=a.subject_id "
+        sql = ("SELECT a.*, sb.name AS subject, sb.sort, sb.short, sb.category, c.grade, c.letter, st.last_name AS t_last, "
+               "st.first_name AS t_first, st.middle_name AS t_middle FROM assignments a JOIN subjects sb ON sb.id=a.subject_id "
                "JOIN classes c ON c.id=a.class_id LEFT JOIN staff st ON st.id=a.teacher_id WHERE c.year_id=? ")
         args = [yid]
+        staff_id = req.arg("staff_id", cast=int)
         if staff_id:
             sql += "AND a.teacher_id=? "
             args.append(staff_id)
+        elif req.arg("mine") or not auth.can_view_all(req.user):
+            sids = auth.staff_ids(db(), req.user) or {-1}
+            sql += "AND a.teacher_id IN (%s) " % ",".join("?" * len(sids))
+            args += list(sids)
         rows = db().q(sql + "ORDER BY c.grade, c.letter, sb.sort, sb.name", args)
     for r in rows:
         r["teacher"] = R.teacher_of(r)
@@ -811,14 +987,42 @@ def api_assignment_create(req):
         if not sbid:
             continue
         sb = db().one("SELECT * FROM subjects WHERE id=?", (int(sbid),))
+        ev = d.get("eval_type") or (sb and sb["eval_type"]) or "points"
+        if sb and sb["category"] in G.ATTEND_CATEGORIES:
+            ev = "attend"
         try:
             insert("assignments", {"class_id": cid, "subject_id": int(sbid), "teacher_id": d.get("teacher_id") or None,
                                    "group_name": (d.get("group_name") or "").strip(), "hours": d.get("hours") or 1,
-                                   "eval_type": d.get("eval_type") or (sb and sb["eval_type"]) or "points"})
+                                   "eval_type": ev})
             n += 1
         except Exception:
             pass
     return {"added": n}
+
+
+@router.route("POST", "/api/classes/:cid/autoload")
+def api_class_autoload(req, cid):
+    """Добавить в класс предметы типового учебного плана по его параллели."""
+    need_manage(req)
+    cid = int(cid)
+    c = db().one("SELECT * FROM classes WHERE id=?", (cid,))
+    need(c, "Класс не найден", 404)
+    from .db import SUBJECT_SHORT
+    names = plans.subjects_for_grade(c["grade"])
+    added = 0
+    for nm in names:
+        sb = db().one("SELECT * FROM subjects WHERE name=?", (nm,))
+        if not sb:
+            sid = db().ex("INSERT INTO subjects(name,short,sort,eval_type,category) VALUES(?,?,?,?,'subject')",
+                          (nm, SUBJECT_SHORT.get(nm, ""), 100, plans.eval_for(nm)))
+            sb = {"id": sid, "eval_type": plans.eval_for(nm)}
+        if db().one("SELECT 1 FROM assignments WHERE class_id=? AND subject_id=? AND group_name=''", (cid, sb["id"])):
+            continue
+        db().ex("INSERT INTO assignments(class_id,subject_id,teacher_id,group_name,hours,eval_type) VALUES(?,?,?,?,?,?)",
+                (cid, sb["id"], c["teacher_id"], "", 1, sb["eval_type"]))
+        added += 1
+    db().audit(req.user, req.ip, "class_autoload", {"class": cid, "added": added})
+    return {"added": added}
 
 
 @router.route("PUT", "/api/assignments/:aid")
@@ -888,7 +1092,7 @@ def api_journal(req, aid):
 def api_lesson_create(req, aid):
     aid = int(aid)
     a = get_assignment(aid)
-    need_journal()
+    need_journal_for(a)
     need(auth.can_edit_assignment(db(), req.user, aid))
     d = req.json()
     date = d.get("date") or time.strftime("%Y-%m-%d")
@@ -927,7 +1131,6 @@ def api_lesson_del(req, lid):
 @router.route("POST", "/api/marks")
 def api_marks(req):
     """Сохранить текущие отметки: {items:[{lesson_id, student_id, value}]}"""
-    need_journal()
     items = req.json().get("items") or []
     cache = {}
     saved = []
@@ -938,11 +1141,15 @@ def api_marks(req):
                 l = db().one("SELECT * FROM lessons WHERE id=?", (lid,))
                 need(l, "Урок не найден", 404)
                 a = get_assignment(l["assignment_id"])
+                need_journal_for(a)
                 need(auth.can_edit_assignment(db(), req.user, a["id"]))
                 need(not locked_date(a["class_id"], l["date"]) or auth.can_admin(req.user), "Период закрыт для редактирования", 400)
                 cache[lid] = a
             a = cache[lid]
-            v = G.normalize(it.get("value"), "current")
+            if a.get("is_attend"):
+                v = G.normalize(it.get("value"), "attend")
+            else:
+                v = G.normalize(it.get("value"), "current")
             if v and a["eval_type"] == "pass" and G.is_point(v):
                 raise ApiError(400, "По предмету «{}» ведётся зачётная система (зач./незач.)".format(a["subject"]))
             if v and a["eval_type"] == "none" and v != G.ABSENT:
@@ -1030,7 +1237,7 @@ def api_sheet(req, cid):
     c = R.get_class(db(), cid)
     y = R.year_of_class(db(), cid)
     studs = R.class_students(db(), cid)
-    asg = R.class_assignments(db(), cid)
+    asg = R.class_assignments(db(), cid, graded_only=True)
     groups = {}
     for a in asg:
         groups[a["id"]] = set(r["student_id"] for r in db().q("SELECT student_id FROM assignment_students WHERE assignment_id=?", (a["id"],)))
@@ -1069,7 +1276,7 @@ def api_sheet(req, cid):
     return {"class": c, "kind": kind, "kind_name": G.kind_name(kind), "kinds": [{"kind": k, "name": n} for k, n in G.all_kinds(y["scheme"] if y else "quarters")],
             "students": [{"id": s["id"], "name": R.fio(s)} for s in studs],
             "subjects": [subjects[i] for i in order], "cellaid": cellaid, "editable": editable, "cells": cells,
-            "behavior": beh, "has_behavior": has_beh, "can_behavior": has_beh and auth.can_edit_class(db(), req.user, cid),
+            "behavior": beh, "has_behavior": has_beh, "can_behavior": has_beh and auth.can_edit_behavior(db(), req.user, cid),
             "locked": bool(p and p["locked"]) and not auth.can_admin(req.user),
             "school": R.school_name(db()), "year": y["name"] if y else ""}
 
@@ -1129,14 +1336,15 @@ def api_behavior(req, cid):
     for b in db().q("SELECT * FROM behavior WHERE class_id=?", (cid,)):
         beh["%d_%s" % (b["student_id"], b["kind"])] = b["value"]
     return {"kinds": [{"kind": k, "name": n} for k, n in kinds], "students": [{"id": s["id"], "name": R.fio(s), "year_result": s.get("year_result", "")} for s in studs],
-            "values": beh, "can_edit": auth.can_edit_class(db(), req.user, cid), "class": R.get_class(db(), cid)}
+            "values": beh, "can_edit": auth.can_edit_behavior(db(), req.user, cid),
+            "can_result": auth.can_edit_class(db(), req.user, cid), "class": R.get_class(db(), cid)}
 
 
 @router.route("POST", "/api/behavior")
 def api_behavior_save(req):
     d = req.json()
     cid = int(d["class_id"])
-    need(auth.can_edit_class(db(), req.user, cid), "Отметку по поведению выставляет классный руководитель")
+    need(auth.can_edit_behavior(db(), req.user, cid), "Отметку по поведению выставляет классный руководитель или учительская")
     need(not locked_kind(cid, d["kind"]) or auth.can_admin(req.user), "Период закрыт", 400)
     v = G.normalize(d.get("value"), "behavior")
     if v:
@@ -1207,6 +1415,26 @@ def rep_parallel(req):
 def rep_lists(req):
     need(auth.can_view_all(req.user))
     return table_response(req, R.lists_report(db(), year_arg(req), _kind(req)))
+
+
+@router.route("GET", "/api/reports/school_subjects")
+def rep_school_subjects(req):
+    need(auth.can_view_all(req.user))
+    return table_response(req, R.school_subjects(db(), year_arg(req), _kind(req)))
+
+
+@router.route("GET", "/api/reports/levels_parallel")
+def rep_levels_parallel(req):
+    need(auth.can_view_all(req.user))
+    return table_response(req, R.levels_by_parallel(db(), year_arg(req), _kind(req)))
+
+
+@router.route("GET", "/api/reports/clubs")
+def rep_clubs(req):
+    need(auth.can_view_all(req.user))
+    cat = req.arg("category")
+    need(cat in G.ATTEND_CATEGORIES, "Неверная категория", 400)
+    return table_response(req, R.clubs_attendance(db(), year_arg(req), cat))
 
 
 @router.route("GET", "/api/reports/teacher")
@@ -1297,44 +1525,119 @@ def _raw_counts(yid, kind):
     return out
 
 
-@router.route("POST", "/api/department/merge")
-def api_department_merge(req):
-    """Свод для отдела образования: объединить пакеты нескольких школ (.sgdep.json)."""
-    need(auth.can_view_all(req.user))
-    files = req.json().get("files") or []
-    kind = req.json().get("kind") or "year"
+def _parse_pkg(raw_bytes, fname=""):
+    pkg = json.loads(raw_bytes.decode("utf-8"))
+    if pkg.get("format") != "SchoolGrade-department":
+        raise ApiError(400, "Файл {} не является пакетом SchoolGrade".format(fname))
+    return pkg
+
+
+def _build_merge(pkgs, kind):
+    """Свод по списку пакетов школ: по учреждениям и по предметам."""
     rl = R.rules(db())
-    schools = []
-    agg = {}
-    for f in files:
-        pkg = json.loads(base64.b64decode(f["data"]).decode("utf-8"))
-        need(pkg.get("format") == "SchoolGrade-department", "Файл {} не является пакетом SchoolGrade".format(f.get("filename")), 400)
+    schools, agg, parallels = [], {}, {}
+    for pkg in pkgs:
         raw = (pkg.get("kinds", {}).get(kind) or {}).get("raw") or {}
         all_vals = []
         for grade, g in raw.items():
+            pv = parallels.setdefault(grade, [])
             for subj, cnt in g["subjects"].items():
                 vals = []
                 for v, n in cnt.items():
                     vals += [v] * n
-                all_vals += vals
+                all_vals += vals; pv += vals
                 agg.setdefault(subj, []).extend(vals)
         st = G.stats(all_vals, rl)
-        schools.append([pkg.get("school", {}).get("Наименование") or f.get("filename"), pkg.get("year"),
+        schools.append([pkg.get("school", {}).get("Наименование") or "—", pkg.get("year"),
                         sum(g["students"] for g in raw.values()), st["count"]] + R._level_cells(st)
                        + [st["other"][G.NOT_ATT], R.fmt(st["avg"], 2), R.fmt(st["kz"]), R.fmt(st["sou"])])
+    rep1 = {"name": "Свод по УО", "title": "Свод по учреждениям образования: " + G.kind_name(kind).lower(),
+            "headers": ["Учреждение", "Уч. год", "Уч-ся", "Отметок"] + R._level_headers() + ["н/а", "Ср. балл", "КЗ %", "СОУ %"],
+            "rows": schools, "widths": [36, 10, 7, 8] + [5, 6] * 5 + [5, 8, 7, 7]}
     subj_rows = []
     for subj in sorted(agg):
         st = G.stats(agg[subj], rl)
         subj_rows.append([subj, st["count"]] + R._level_cells(st) + [st["other"][G.NOT_ATT], R.fmt(st["avg"], 2), R.fmt(st["kz"]), R.fmt(st["sou"])])
-    rep1 = {"name": "Свод по УО", "title": "Свод по учреждениям образования: " + G.kind_name(kind).lower(),
-            "headers": ["Учреждение", "Уч. год", "Уч-ся", "Отметок"] + R._level_headers() + ["н/а", "Ср. балл", "КЗ %", "СОУ %"],
-            "rows": schools, "widths": [36, 10, 7, 8] + [5, 6] * 5 + [5, 8, 7, 7]}
     rep2 = {"name": "Свод по предметам", "title": "Свод по предметам: " + G.kind_name(kind).lower(),
             "headers": ["Предмет", "Отметок"] + R._level_headers() + ["н/а", "Ср. балл", "КЗ %", "СОУ %"],
             "rows": subj_rows, "widths": [36, 8] + [5, 6] * 5 + [5, 8, 7, 7]}
+    par_rows = []
+    for grade in sorted(parallels, key=lambda x: int(x) if str(x).isdigit() else 99):
+        st = G.stats(parallels[grade], rl)
+        par_rows.append([str(grade) + " классы", st["count"]] + R._level_cells(st)
+                        + [st["other"][G.NOT_ATT], R.fmt(st["avg"], 2), R.fmt(st["kz"]), R.fmt(st["sou"])])
+    rep3 = {"name": "Свод по параллелям", "title": "Свод по параллелям: " + G.kind_name(kind).lower(),
+            "headers": ["Параллель", "Отметок"] + R._level_headers() + ["н/а", "Ср. балл", "КЗ %", "СОУ %"],
+            "rows": par_rows, "widths": [16, 8] + [5, 6] * 5 + [5, 8, 7, 7]}
+    return [rep1, rep3, rep2]
+
+
+@router.route("POST", "/api/department/merge")
+def api_department_merge(req):
+    """Свод из пакетов, переданных прямо в запросе (разовый расчёт)."""
+    need(auth.can_view_all(req.user))
+    files = req.json().get("files") or []
+    kind = req.json().get("kind") or "year"
+    pkgs = [_parse_pkg(base64.b64decode(f["data"]), f.get("filename")) for f in files]
+    reps = _build_merge(pkgs, kind)
     if req.arg("format") == "xlsx":
-        return FileResponse(xlsx.build([rep1, rep2]), "Свод_отдел_образования.xlsx", XLSX_CT)
-    return {"reports": [rep1, rep2]}
+        return FileResponse(xlsx.build(reps), "Свод_отдел_образования.xlsx", XLSX_CT)
+    return {"reports": reps}
+
+
+# ----- хранимые пакеты школ (режим «Отдел образования») -----
+@router.route("GET", "/api/department/packages")
+def api_dep_packages(req):
+    need(auth.can_view_all(req.user))
+    return db().q("SELECT id, school, year, filename, uploaded_at FROM dep_packages ORDER BY school, year")
+
+
+@router.route("POST", "/api/department/packages")
+def api_dep_pkg_add(req):
+    need_manage(req)
+    items = req.json().get("files") or []
+    added = 0
+    for f in items:
+        raw = base64.b64decode(f["data"])
+        pkg = _parse_pkg(raw, f.get("filename"))
+        school = (pkg.get("school") or {}).get("Наименование") or f.get("filename")
+        # заменить прежний пакет этой школы за тот же год
+        db().ex("DELETE FROM dep_packages WHERE school=? AND year=?", (school, pkg.get("year") or ""))
+        db().ex("INSERT INTO dep_packages(school,year,filename,data) VALUES(?,?,?,?)",
+                (school, pkg.get("year") or "", f.get("filename") or "", raw.decode("utf-8")))
+        added += 1
+    db().audit(req.user, req.ip, "dep_pkg_added", added)
+    return {"added": added}
+
+
+@router.route("DELETE", "/api/department/packages/:pid")
+def api_dep_pkg_del(req, pid):
+    need_manage(req)
+    db().ex("DELETE FROM dep_packages WHERE id=?", (int(pid),))
+    return {"ok": True}
+
+
+@router.route("GET", "/api/department/package/:pid")
+def api_dep_pkg_one(req, pid):
+    need(auth.can_view_all(req.user))
+    row = db().one("SELECT * FROM dep_packages WHERE id=?", (int(pid),))
+    need(row, "Пакет не найден", 404)
+    pkg = json.loads(row["data"])
+    return {"school": pkg.get("school") or {}, "year": pkg.get("year"), "fields": SCHOOL_FIELDS,
+            "kinds": [{"kind": k, "name": n} for k, n in G.all_kinds("quarters")]}
+
+
+@router.route("GET", "/api/department/summary")
+def api_dep_summary(req):
+    need(auth.can_view_all(req.user))
+    kind = req.arg("kind") or "year"
+    rows = db().q("SELECT data FROM dep_packages")
+    need(rows, "Пакеты школ не загружены", 400)
+    pkgs = [json.loads(r["data"]) for r in rows]
+    reps = _build_merge(pkgs, kind)
+    if req.arg("format") == "xlsx":
+        return FileResponse(xlsx.build(reps), "Свод_по_району.xlsx", XLSX_CT)
+    return {"reports": reps}
 
 
 # ================================================================ администрирование
@@ -1403,6 +1706,36 @@ def api_backup_restore(req):
     db().restore(src)
     db().audit(req.user, req.ip, "restore", os.path.basename(src))
     return {"ok": True}
+
+
+@router.route("GET", "/api/export/full")
+def api_export_full(req):
+    """Экспорт всех настроек и оценок для переноса на другой сервер.
+    Это снимок базы: пароли — необратимый хэш, персональные данные обфусцированы
+    тем же ключом, что и в программе, поэтому другой сервер SchoolGrade прочитает их."""
+    need_admin(req)
+    import tempfile
+    import sqlite3 as _sq
+    fd, tmp = tempfile.mkstemp(suffix=".db", dir=APP["app"].backup_dir)
+    os.close(fd)
+    try:
+        with db().lock:
+            tgt = _sq.connect(tmp)
+            try:
+                db().conn.backup(tgt)
+            finally:
+                tgt.close()
+        with open(tmp, "rb") as f:
+            data = f.read()
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    db().audit(req.user, req.ip, "export_full")
+    school = (db().get_setting("school", {}) or {}).get("Наименование", "SchoolGrade")
+    fname = "SchoolGrade_{}_{}.sgdb".format((school or "data").replace(" ", "_")[:40], time.strftime("%Y-%m-%d"))
+    return FileResponse(data, fname, "application/octet-stream")
 
 
 @router.route("POST", "/api/demo")

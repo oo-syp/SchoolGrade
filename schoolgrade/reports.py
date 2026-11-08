@@ -3,6 +3,7 @@
 {title, subtitle, headers, rows, widths, footer, name} — одинаково для показа
 в интерфейсе, печати и выгрузки в Excel."""
 from . import grading as G
+from . import crypto
 
 LEVEL_COLS = [("high", "9–10"), ("suf", "7–8"), ("mid", "5–6"), ("sat", "3–4"), ("low", "1–2")]
 
@@ -51,7 +52,7 @@ def class_students(db, class_id, include_left=False):
     if not include_left:
         sql += "AND (cs.date_out IS NULL OR cs.date_out='') "
     sql += "ORDER BY s.last_name COLLATE NOCASE, s.first_name COLLATE NOCASE"
-    return db.q(sql, (class_id,))
+    return [crypto.dec_row("students", r) for r in db.q(sql, (class_id,))]
 
 
 def assignment_students(db, a):
@@ -63,11 +64,14 @@ def assignment_students(db, a):
     return studs
 
 
-def class_assignments(db, class_id):
-    return db.q("SELECT a.*, sb.name AS subject, sb.sort, sb.short, st.last_name AS t_last, st.first_name AS t_first, "
-                "st.middle_name AS t_middle FROM assignments a JOIN subjects sb ON sb.id=a.subject_id "
-                "LEFT JOIN staff st ON st.id=a.teacher_id WHERE a.class_id=? "
-                "ORDER BY sb.sort, sb.name, a.group_name", (class_id,))
+def class_assignments(db, class_id, graded_only=False):
+    sql = ("SELECT a.*, sb.name AS subject, sb.sort, sb.short, sb.category, st.last_name AS t_last, st.first_name AS t_first, "
+           "st.middle_name AS t_middle FROM assignments a JOIN subjects sb ON sb.id=a.subject_id "
+           "LEFT JOIN staff st ON st.id=a.teacher_id WHERE a.class_id=? ")
+    if graded_only:
+        sql += "AND sb.category='subject' "
+    sql += "ORDER BY sb.sort, sb.name, a.group_name"
+    return db.q(sql, (class_id,))
 
 
 def teacher_of(a):
@@ -82,8 +86,9 @@ def finals_map(db, class_id, kind):
 
 
 def subjects_of_class(db, class_id):
+    """Учебные предметы класса (без факультативов и объединений по интересам)."""
     seen, out = set(), []
-    for a in class_assignments(db, class_id):
+    for a in class_assignments(db, class_id, graded_only=True):
         if a["subject_id"] not in seen:
             seen.add(a["subject_id"])
             out.append(a)
@@ -291,6 +296,159 @@ def parallel_subjects(db, year_id, grade, kind):
         "subtitle": "{}\n{} учебный год, классов в параллели: {}".format(school_name(db), y["name"] if y else "", len(classes)),
         "headers": headers, "rows": rows,
         "widths": [28, 8] + [5, 6] * 5 + [5] + [4] * 10 + [8, 7, 7],
+    }
+
+
+ASC_LEVELS = [("low", "Низкий"), ("sat", "Удовлетворит."), ("mid", "Средний"), ("suf", "Достаточный"), ("high", "Высокий")]
+
+
+def school_subjects(db, year_id, kind):
+    """Аналитическая информация по предметам в целом по учреждению
+    (как «Аналитическая информация по предметам» в «Старт ШКОЛА»)."""
+    rl = rules(db)
+    y = db.one("SELECT * FROM years WHERE id=?", (year_id,))
+    classes = db.q("SELECT * FROM classes WHERE year_id=? ORDER BY grade, letter", (year_id,))
+    data, order, nstud = {}, {}, {}
+    for c in classes:
+        studs = set(s["id"] for s in class_students(db, c["id"]))
+        fm = finals_map(db, c["id"], kind)
+        for sb in subjects_of_class(db, c["id"]):
+            order[sb["subject_id"]] = (sb["sort"], sb["subject"])
+            data.setdefault(sb["subject_id"], [])
+            vals = [v for (sid, subj), v in fm.items() if subj == sb["subject_id"] and sid in studs]
+            data[sb["subject_id"]] += vals
+            nstud[sb["subject_id"]] = nstud.get(sb["subject_id"], 0) + len(studs)
+    headers = ["Предмет", "Уч-ся"]
+    for _, lbl in ASC_LEVELS:
+        headers += [lbl, "%"]
+    headers += ["Ср. балл", "СОУ %", "КЗ %"]
+    rows = []
+    tot = []
+    for sid in sorted(order, key=lambda k: order[k]):
+        st = G.stats(data[sid], rl)
+        tot += data[sid]
+        row = [order[sid][1], nstud.get(sid, 0)]
+        for code, _ in ASC_LEVELS:
+            row += [st["levels"][code], fmt(st["levels_pct"][code])]
+        rows.append(row + [fmt(st["avg"], 2), fmt(st["sou"]), fmt(st["kz"])])
+    st = G.stats(tot, rl)
+    trow = ["ИТОГО по школе", ""]
+    for code, _ in ASC_LEVELS:
+        trow += [st["levels"][code], fmt(st["levels_pct"][code])]
+    rows.append(trow + [fmt(st["avg"], 2), fmt(st["sou"]), fmt(st["kz"])])
+    return {
+        "name": "Предметы (школа)",
+        "title": "Аналитическая информация по предметам: {}".format(kind_title(db, kind).lower()),
+        "subtitle": "{}\n{} учебный год".format(school_name(db), y["name"] if y else ""),
+        "headers": headers, "rows": rows,
+        "widths": [28, 6] + [6, 6] * 5 + [8, 7, 7],
+    }
+
+
+LEVELS_PAR_HEADERS = (["Параллель", "К-во учащихся"]
+                      + sum([[lbl + ", к-во", "%"] for _, lbl in ASC_LEVELS], [])
+                      + ["Средний балл", "СОУ", "Качество знаний"])
+
+
+def _pct(n, total):
+    return fmt(100.0 * n / total, 2) if (n and total) else ""
+
+
+def _parallel_levels_rows(db, classes, grades, kind, rl):
+    """Строки «параллель × уровни» за один период (как в «Старт ШКОЛА»).
+    Учащийся относится к уровню по самой низкой отметке; учитываются
+    учащиеся, у которых есть балльные отметки за период."""
+    per = {g: {"n": 0, "lv": dict((c, 0) for c, _ in ASC_LEVELS), "vals": []} for g in grades}
+    for c in classes:
+        if c["grade"] not in per:
+            per[c["grade"]] = {"n": 0, "lv": dict((x, 0) for x, _ in ASC_LEVELS), "vals": []}
+        p = per[c["grade"]]
+        subj = set(sb["subject_id"] for sb in subjects_of_class(db, c["id"]))
+        fm = finals_map(db, c["id"], kind)
+        for s in class_students(db, c["id"]):
+            vals = [v for (sid, sb), v in fm.items() if sid == s["id"] and sb in subj]
+            lv = G.student_level(vals)
+            if lv:
+                p["n"] += 1
+                p["lv"][lv] += 1
+            p["vals"] += vals
+    rows = []
+    tot = {"n": 0, "lv": dict((c, 0) for c, _ in ASC_LEVELS), "vals": []}
+    for g in sorted(per):
+        p = per[g]
+        st = G.stats(p["vals"], rl)
+        row = [g, p["n"]]
+        for code, _ in ASC_LEVELS:
+            row += [p["lv"][code], _pct(p["lv"][code], p["n"])]
+            tot["lv"][code] += p["lv"][code]
+        row += [fmt(st["avg"], 2), fmt(st["sou"], 2), fmt(st["kz"], 2)] if st["count"] else ["", "", ""]
+        rows.append(row)
+        tot["n"] += p["n"]
+        tot["vals"] += p["vals"]
+    st = G.stats(tot["vals"], rl)
+    trow = ["Итого по школе", tot["n"]]
+    for code, _ in ASC_LEVELS:
+        trow += [tot["lv"][code], _pct(tot["lv"][code], tot["n"])]
+    trow += [fmt(st["avg"], 2), fmt(st["sou"], 2), fmt(st["kz"], 2)] if st["count"] else ["", "", ""]
+    rows.append(trow)
+    return rows
+
+
+def levels_by_parallel(db, year_id, kind):
+    """Успеваемость по параллелям по уровням: за один период или
+    сводно за все периоды года (kind='all') — блоками, как в «Старт ШКОЛА»."""
+    from . import plans
+    rl = rules(db)
+    y = db.one("SELECT * FROM years WHERE id=?", (year_id,)) or {}
+    classes = db.q("SELECT * FROM classes WHERE year_id=? ORDER BY grade, letter", (year_id,))
+    lo, hi = plans.org_range(db.get_setting("org_type") or "secondary")
+    grades = list(range(lo, hi + 1))
+    sub = "{}\n{} учебный год".format(school_name(db), y.get("name", ""))
+    base = {"headers": LEVELS_PAR_HEADERS, "widths": [16, 9] + [7, 7] * 5 + [9, 8, 9],
+            "footer": ["Уровень учащегося определяется по самой низкой отметке; % — от количества учащихся параллели, имеющих отметки. "
+                       "Средний балл, СОУ и качество знаний (доля отметок {}–10) — по всем отметкам параллели.".format(rl["kz_min_point"])]}
+    if kind != "all":
+        rep = dict(base)
+        rep.update({"name": "Уровни по параллелям",
+                    "title": "Из них имеют оценки (по уровням): {}".format(kind_title(db, kind).lower()),
+                    "subtitle": sub, "rows": _parallel_levels_rows(db, classes, grades, kind, rl)})
+        return rep
+    rows = []
+    for k, nm in G.all_kinds(y.get("scheme") or "quarters"):
+        rows.append({"group": "Из них имеют оценки (по уровням): " + nm.lower()})
+        rows += _parallel_levels_rows(db, classes, grades, k, rl)
+    rep = dict(base)
+    rep.update({"name": "Уровни по параллелям (год)",
+                "title": "Успеваемость по параллелям по уровням за все периоды",
+                "subtitle": sub, "rows": rows, "repeat_headers": True})
+    return rep
+
+
+def clubs_attendance(db, year_id, category):
+    """Посещаемость факультативов (ФЗ) или объединений по интересам (ОпИ).
+    Считается по записям в журнале (пропуски «н»)."""
+    y = db.one("SELECT * FROM years WHERE id=?", (year_id,))
+    cat_name = G.CATEGORIES.get(category, category)
+    rows = []
+    q = db.q("SELECT a.id AS aid, a.group_name, sb.name AS subject, c.id AS cid, c.grade, c.letter "
+             "FROM assignments a JOIN subjects sb ON sb.id=a.subject_id JOIN classes c ON c.id=a.class_id "
+             "WHERE c.year_id=? AND sb.category=? ORDER BY sb.name, c.grade, c.letter", (year_id, category))
+    for a in q:
+        studs = assignment_students(db, {"id": a["aid"], "class_id": a["cid"]})
+        lessons = db.val("SELECT COUNT(*) FROM lessons WHERE assignment_id=?", (a["aid"],)) or 0
+        absent = db.val("SELECT COUNT(*) FROM marks m JOIN lessons l ON l.id=m.lesson_id "
+                        "WHERE l.assignment_id=? AND m.value='н'", (a["aid"],)) or 0
+        left = db.val("SELECT COUNT(DISTINCT m.student_id) FROM marks m JOIN lessons l ON l.id=m.lesson_id "
+                      "WHERE l.assignment_id=? AND m.value='выб'", (a["aid"],)) or 0
+        rows.append([a["subject"] + (" (" + a["group_name"] + ")" if a["group_name"] else ""),
+                     class_name({"grade": a["grade"], "letter": a["letter"]}), len(studs), lessons, absent, left])
+    return {
+        "name": cat_name,
+        "title": "Посещаемость: {}".format(cat_name.lower()),
+        "subtitle": "{}\n{} учебный год".format(school_name(db), y["name"] if y else ""),
+        "headers": ["Занятие", "Класс", "Участников", "Проведено", "Пропусков «н»", "Выбыло"],
+        "rows": rows, "widths": [34, 10, 11, 11, 13, 9],
+        "footer": ["Учитываются записи в журнале по занятиям данной категории."],
     }
 
 
