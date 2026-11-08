@@ -1098,8 +1098,16 @@ def api_lesson_create(req, aid):
     date = d.get("date") or time.strftime("%Y-%m-%d")
     need(not locked_date(a["class_id"], date) or auth.can_admin(req.user), "Период закрыт для редактирования", 400)
     num = db().val("SELECT COUNT(*) FROM lessons WHERE assignment_id=? AND date=?", (aid, date)) + 1
-    lid = insert("lessons", {"assignment_id": aid, "date": date, "num": num, "topic": d.get("topic", ""),
-                             "homework": d.get("homework", ""), "work_type": d.get("work_type", "")})
+    topic = d.get("topic", "")
+    if "ktp_id" in d:
+        kid = _ktp_item_id(aid, d.get("ktp_id"))
+    else:   # вызов без выбора темы: взять следующую тему из КТП
+        nxt = _ktp_next(aid) if not topic else None
+        kid = nxt["id"] if nxt else None
+    if kid and not topic:
+        topic = db().val("SELECT topic FROM ktp WHERE id=?", (kid,)) or ""
+    lid = insert("lessons", {"assignment_id": aid, "date": date, "num": num, "topic": topic,
+                             "homework": d.get("homework", ""), "work_type": d.get("work_type", ""), "ktp_id": kid})
     return {"id": lid}
 
 
@@ -1109,7 +1117,10 @@ def api_lesson_put(req, lid):
     need(l, "Урок не найден", 404)
     a = get_assignment(l["assignment_id"])
     need(auth.can_edit_assignment(db(), req.user, a["id"]))
-    d = pick(req.json(), ["date", "topic", "homework", "work_type"])
+    raw = req.json()
+    d = pick(raw, ["date", "topic", "homework", "work_type"])
+    if "ktp_id" in raw:
+        d["ktp_id"] = _ktp_item_id(a["id"], raw.get("ktp_id"))
     for dt in [l["date"], d.get("date") or l["date"]]:
         need(not locked_date(a["class_id"], dt) or auth.can_admin(req.user), "Период закрыт для редактирования", 400)
     update("lessons", int(lid), d)
@@ -1746,3 +1757,268 @@ def api_demo(req):
     demo.fill(db())
     db().audit(req.user, req.ip, "demo_loaded")
     return {"ok": True}
+
+
+# ------------------------------------------------------------------ импорт из «Старт ШКОЛА»
+from . import startschool as SS   # noqa: E402
+
+START_IMPORTS = {}   # user_id -> {имя файла: разобранная книга}
+
+
+def _start_files(req):
+    return START_IMPORTS.setdefault(req.user["id"], {})
+
+
+def _start_opts(d):
+    return {"kinds": [k for k in (d.get("kinds") or []) if k in SS.KIND_NAMES] or None,
+            "overwrite": bool(d.get("overwrite")), "passport": d.get("passport", True) is not False,
+            "staff": d.get("staff", True) is not False, "create_teachers": d.get("create_teachers", True) is not False}
+
+
+@router.route("GET", "/api/import/startschool")
+def api_start_list(req):
+    need_admin(req)
+    need_school(req)
+    return {"files": [SS.file_summary(p) for p in _start_files(req).values()],
+            "kinds": [{"kind": k, "name": n} for k, _s, n in SS.KINDS]}
+
+
+@router.route("POST", "/api/import/startschool/file")
+def api_start_file(req):
+    need_admin(req)
+    need_school(req)
+    d = req.json()
+    name = os.path.basename(d.get("filename") or "file.xls")
+    try:
+        data = base64.b64decode(d.get("data") or "")
+    except Exception:
+        raise ApiError(400, "Файл повреждён при загрузке")
+    try:
+        parsed = SS.parse_file(name, data)
+    except SS.ImportError_ as e:
+        raise ApiError(400, str(e))
+    _start_files(req)[name] = parsed
+    return api_start_list(req)
+
+
+@router.route("DELETE", "/api/import/startschool")
+def api_start_clear(req):
+    need_admin(req)
+    START_IMPORTS.pop(req.user["id"], None)
+    return {"ok": True}
+
+
+def _start_run(req, dry):
+    files = list(_start_files(req).values())
+    need(files, "Сначала добавьте файлы «Старт ШКОЛА»", 400)
+    try:
+        return SS.apply(db(), files, _start_opts(req.json()), req.user, dry_run=dry)
+    except SS.ImportError_ as e:
+        raise ApiError(400, str(e))
+
+
+@router.route("POST", "/api/import/startschool/preview")
+def api_start_preview(req):
+    need_admin(req)
+    need_school(req)
+    return _start_run(req, True)
+
+
+@router.route("POST", "/api/import/startschool/commit")
+def api_start_commit(req):
+    need_admin(req)
+    need_school(req)
+    need(_start_files(req), "Сначала добавьте файлы «Старт ШКОЛА»", 400)
+    backup = db().backup(APP["app"].backup_dir, "before_import")
+    rep = _start_run(req, False)
+    rep["backup"] = os.path.basename(backup)
+    db().audit(req.user, req.ip, "import_startschool",
+               {"files": list(_start_files(req)), "summary": rep["summary"], "marks": rep["marks"]})
+    START_IMPORTS.pop(req.user["id"], None)
+    return rep
+
+
+# ------------------------------------------------------------------ контроль накопляемости
+def _scoped_assignments(req, year_id, class_id=None):
+    """Нагрузки, которые пользователь вправе контролировать: администрация —
+    все; учитель — свои предметы и все предметы своего класса."""
+    u = req.user
+    sql = ("SELECT a.*, sb.name AS subject, sb.sort, sb.category, c.grade, c.letter, st.last_name AS t_last, "
+           "st.first_name AS t_first, st.middle_name AS t_middle FROM assignments a "
+           "JOIN subjects sb ON sb.id=a.subject_id JOIN classes c ON c.id=a.class_id "
+           "LEFT JOIN staff st ON st.id=a.teacher_id WHERE c.year_id=? AND sb.category='subject'")
+    args = [year_id]
+    if class_id:
+        sql += " AND c.id=?"
+        args.append(int(class_id))
+    rows = db().q(sql, args)
+    if auth.can_view_all(u):
+        return rows
+    mine = auth.teacher_assignment_ids(db(), u)
+    own = auth.own_class_ids(db(), u)
+    return [a for a in rows if a["id"] in mine or a["class_id"] in own]
+
+
+@router.route("GET", "/api/reports/accumulation")
+def rep_accumulation(req):
+    need_school(req)
+    y = year_arg(req)
+    kind = req.arg("kind") or R.current_kind(db(), y)
+    need(kind in ("q1", "q2", "q3", "q4", "h1", "h2"), "Контроль накопляемости выполняется для четвертей (полугодий)", 400)
+    asg = _scoped_assignments(req, y, req.arg("class_id", cast=int))
+    rep = R.accumulation(db(), y, kind, asg, bool(features().get("journal", True)))
+    rep["kind"] = kind
+    return table_response(req, rep)
+
+
+@router.route("GET", "/api/classes/:cid/report_cards")
+def api_report_cards(req, cid):
+    need_school(req)
+    need(auth.can_view_class(db(), req.user, cid))
+    kinds = [k for k in (req.arg("kinds") or "").split(",") if k] or None
+    ids = [x for x in (req.arg("students") or "").split(",") if x.strip().isdigit()] or None
+    return R.report_cards(db(), int(cid), kinds, ids)
+
+
+# ------------------------------------------------------------------ календарно-тематическое планирование
+from . import ktp as KTP   # noqa: E402
+
+KTP_FIELDS = ["num", "topic", "hours", "planned_date", "section", "note"]
+
+
+def _ktp_item_id(aid, kid):
+    """Проверить, что пункт КТП принадлежит этой нагрузке."""
+    if not kid:
+        return None
+    return db().val("SELECT id FROM ktp WHERE id=? AND assignment_id=?", (int(kid), int(aid)))
+
+
+def _ktp_items(aid):
+    items = db().q("SELECT * FROM ktp WHERE assignment_id=? ORDER BY num, id", (int(aid),))
+    done = {}
+    for l in db().q("SELECT id, date, ktp_id FROM lessons WHERE assignment_id=? AND ktp_id IS NOT NULL ORDER BY date", (int(aid),)):
+        done.setdefault(l["ktp_id"], []).append(l["date"])
+    for it in items:
+        it["done"] = done.get(it["id"], [])
+    return items
+
+
+def _ktp_next(aid):
+    for it in _ktp_items(aid):
+        if len(it["done"]) < max(1, int(round(float(it["hours"] or 1)))):
+            return it
+    return None
+
+
+def _need_ktp_view(req, aid):
+    a = get_assignment(int(aid))
+    need(auth.can_view_class(db(), req.user, a["class_id"]))
+    return a
+
+
+def _can_edit_ktp(req, a):
+    return auth.can_edit_assignment(db(), req.user, a["id"]) or auth.can_enter_marks_any(req.user)
+
+
+@router.route("GET", "/api/assignments/:aid/ktp")
+def api_ktp_get(req, aid):
+    need_school(req)
+    a = _need_ktp_view(req, aid)
+    items = _ktp_items(aid)
+    lessons_total = db().val("SELECT COUNT(*) FROM lessons WHERE assignment_id=?", (a["id"],)) or 0
+    nxt = _ktp_next(aid)
+    return {"assignment": a, "items": items, "can_edit": _can_edit_ktp(req, a),
+            "next_id": nxt["id"] if nxt else None,
+            "stats": {"items": len(items), "hours": sum(float(i["hours"] or 0) for i in items),
+                      "done_items": sum(1 for i in items if i["done"]), "lessons_total": lessons_total,
+                      "lessons_linked": sum(len(i["done"]) for i in items)}}
+
+
+@router.route("PUT", "/api/assignments/:aid/ktp")
+def api_ktp_put(req, aid):
+    need_school(req)
+    a = _need_ktp_view(req, aid)
+    need(_can_edit_ktp(req, a))
+    items = req.json().get("items") or []
+    need(len(items) <= 1000, "Слишком много строк", 400)
+    existing = set(r["id"] for r in db().q("SELECT id FROM ktp WHERE assignment_id=?", (a["id"],)))
+    keep = set()
+    with db().tx():
+        for i, it in enumerate(items):
+            row = pick(it, KTP_FIELDS)
+            row["topic"] = (row.get("topic") or "").strip()[:500]
+            if not row["topic"]:
+                continue
+            try:
+                row["hours"] = float(str(row.get("hours") or 1).replace(",", ".")) or 1.0
+            except ValueError:
+                row["hours"] = 1.0
+            row["num"] = i + 1
+            row["planned_date"] = (row.get("planned_date") or "")[:10]
+            iid = it.get("id")
+            if iid and int(iid) in existing:
+                update("ktp", int(iid), row)
+                keep.add(int(iid))
+            else:
+                row["assignment_id"] = a["id"]
+                keep.add(insert("ktp", row))
+        for gone in existing - keep:
+            db().ex("DELETE FROM ktp WHERE id=?", (gone,))
+    db().audit(req.user, req.ip, "ktp_saved", {"assignment": a["id"], "items": len(keep)})
+    return api_ktp_get(req, aid)
+
+
+@router.route("POST", "/api/ktp/parse")
+def api_ktp_parse(req):
+    need_school(req)
+    d = req.json()
+    y = current_year()
+    start = int((y or {}).get("name", "2026")[:4]) if y else 2026
+    try:
+        if d.get("text") is not None:
+            items, notes = KTP.parse(text=d["text"], start_year=start)
+        else:
+            items, notes = KTP.parse(d.get("filename") or "", base64.b64decode(d.get("data") or ""), start_year=start)
+    except KTP.KtpError as e:
+        raise ApiError(400, str(e))
+    return {"items": items, "notes": notes}
+
+
+@router.route("GET", "/api/assignments/:aid/ktp/sources")
+def api_ktp_sources(req, aid):
+    need_school(req)
+    a = _need_ktp_view(req, aid)
+    rows = db().q("SELECT a.id, a.group_name, c.grade, c.letter, c.year_id, y.name AS year, st.last_name t_last, st.first_name t_first, "
+                  "st.middle_name t_middle, (SELECT COUNT(*) FROM ktp k WHERE k.assignment_id=a.id) AS n "
+                  "FROM assignments a JOIN classes c ON c.id=a.class_id JOIN years y ON y.id=c.year_id "
+                  "LEFT JOIN staff st ON st.id=a.teacher_id WHERE a.subject_id=? AND a.id<>? "
+                  "AND (SELECT COUNT(*) FROM ktp k WHERE k.assignment_id=a.id)>0 ORDER BY y.name DESC, c.grade, c.letter",
+                  (a["subject_id"], a["id"]))
+    my_grade = db().val("SELECT grade FROM classes WHERE id=?", (a["class_id"],))
+    rows.sort(key=lambda r: (r["grade"] != my_grade, -int(r["year"][:4] or 0), r["grade"], r["letter"]))
+    return [{"id": r["id"], "n": r["n"], "title": "%s, %s класс%s — %s, %s строк" % (
+        r["year"], R.class_name(r), (" (" + r["group_name"] + ")") if r["group_name"] else "",
+        R.teacher_of(r) or "учитель не указан", r["n"])} for r in rows]
+
+
+@router.route("GET", "/api/assignments/:aid/ktp/xlsx")
+def api_ktp_xlsx(req, aid):
+    need_school(req)
+    a = _need_ktp_view(req, aid)
+    items = _ktp_items(aid)
+    rep = {"name": "КТП", "title": "Календарно-тематическое планирование: {}, {} класс".format(a["subject"], a.get("class_name", "")),
+           "subtitle": R.school_name(db()),
+           "headers": ["№", "Раздел", "Тема урока", "Часов", "Дата по плану", "Проведено", "Примечание"],
+           "widths": [5, 26, 60, 7, 12, 16, 20],
+           "rows": [[i["num"], i["section"], i["topic"], R.fmt(float(i["hours"]), 1).replace(",0", ""),
+                     R._ru_date(i["planned_date"]), ", ".join(R._ru_date(x) for x in i["done"]), i["note"]] for i in items]}
+    data = xlsx.build([rep])
+    return FileResponse(data, "KTP_{}_{}.xlsx".format(a["subject"], a.get("class_name", "")).replace(" ", "_"), XLSX_CT)
+
+
+@router.route("GET", "/api/reports/ktp_progress")
+def rep_ktp_progress(req):
+    need_school(req)
+    y = year_arg(req)
+    asg = _scoped_assignments(req, y, req.arg("class_id", cast=int))
+    return table_response(req, R.ktp_progress(db(), y, asg))

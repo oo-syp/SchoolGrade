@@ -69,9 +69,15 @@
     });
   }
   function pickFile(accept, multiple) {
+    // поле выбора файла должно быть в документе: «висящий» элемент браузер
+    // может удалить сборщиком мусора до того, как пользователь выберет файл
+    var old = document.getElementById("sg-file-pick");
+    if (old) old.remove();
     return new Promise(function (res) {
-      var i = h("input", { type: "file", accept: accept, multiple: multiple });
-      i.onchange = function () { res(Array.prototype.slice.call(i.files)); };
+      var i = h("input", { type: "file", accept: accept, id: "sg-file-pick", style: { display: "none" } });
+      if (multiple) i.multiple = true;
+      i.onchange = function () { var f = Array.prototype.slice.call(i.files); i.remove(); res(f); };
+      document.body.appendChild(i);
       i.click();
     });
   }
@@ -123,6 +129,7 @@
       inputs[d.k] = inp;
       f.appendChild(field(d.label, inp, d.wide ? "wide" : ""));
     });
+    f.inputs = inputs;
     f.values = function () {
       var o = {};
       fields.forEach(function (d) { var i = inputs[d.k]; o[d.k] = d.type === "check" ? (i.checked ? 1 : 0) : i.value; });
@@ -226,8 +233,8 @@
 
   // ===================================================================== оболочка
   var NAV_SCHOOL = [
-    ["Работа", [["#/", "Главная"], ["#/sheet", "Ведомость класса"], ["#/journal", "Электронный журнал", "journal"], ["#/finals", "Отметки по предмету"], ["#/behavior", "Поведение и итоги года"]]],
-    ["Анализ", [["#/reports", "Отчёты и аналитика"], ["#/department", "Передать в отдел образования", "all"]]],
+    ["Работа", [["#/", "Главная"], ["#/sheet", "Ведомость класса"], ["#/journal", "Электронный журнал", "journal"], ["#/finals", "Отметки по предмету"], ["#/behavior", "Поведение и итоги года"], ["#/cards", "Табели для родителей"], ["#/ktp", "Тематическое планирование"]]],
+    ["Анализ", [["#/control", "Контроль накопляемости"], ["#/reports", "Отчёты и аналитика"], ["#/department", "Передать в отдел образования", "all"]]],
     ["Данные", [["#/classes", "Классы и нагрузка"], ["#/students", "Учащиеся"], ["#/staff", "Сотрудники", "manage"], ["#/subjects", "Предметы", "manage"]]],
     ["Учреждение", [["#/school", "Паспорт учреждения"], ["#/years", "Учебный год", "manage"], ["#/admin", "Администрирование", "admin"], ["#/about", "О программе"]]],
   ];
@@ -358,11 +365,291 @@
         " ", h("a", { href: "#/sheet?cid=" + c.id, style: { fontSize: "12px" } }, "ведомость")));
     });
     g.appendChild(c2);
+    try {
+      var acc = await GET("/api/reports/accumulation", { year_id: yid(), kind: curKind() });
+      var tot = Object.keys(acc.counts).reduce(function (a, k) { return a + acc.counts[k]; }, 0);
+      if (tot) {
+        $main.appendChild(h("div", { class: "card warnbox" }, h("b", null, "Контроль накопляемости отметок: замечаний — " + tot),
+          h("div", { class: "hint" }, Object.keys(acc.counts).filter(function (k) { return acc.counts[k]; }).map(function (k) { return acc.issue_names[k] + ": " + acc.counts[k]; }).join(" · ")),
+          h("a", { class: "btn", href: "#/control", style: { marginTop: "6px", display: "inline-block" } }, "Подробнее")));
+      }
+    } catch (e) { /* период не задан — пропустить */ }
     var lg = h("div", { class: "card legend" }, h("b", null, "Уровни результатов учебной деятельности: "),
       [["lv-low", "низкий 1–2"], ["lv-sat", "удовлетворительный 3–4"], ["lv-mid", "средний 5–6"], ["lv-suf", "достаточный 7–8"], ["lv-high", "высокий 9–10"]].map(function (x) {
         return h("span", null, h("i", { class: x[0] }), x[1]);
       }), h("div", { class: "hint" }, "Специальные отметки: зач. — зачтено, незач. — не зачтено, осв. — освобождён, н/а — не аттестован, н/и — не изучал; в журнале «н» — отсутствовал. Поведение: прим., уд., неуд."));
     $main.appendChild(lg);
+  };
+
+  // ===================================================================== календарно-тематическое планирование
+  ROUTES.ktp = async function (params) {
+    await loadPeriods();
+    head("Календарно-тематическое планирование", "Темы уроков по плану учителя; в журнале тема нового урока подставляется автоматически");
+    var tab = params.tab || "plan";
+    $main.appendChild(h("div", { class: "tabs" }, [["plan", "План по предмету"], ["progress", "Выполнение программы"]].map(function (t) {
+      return h("a", { href: "javascript:void 0", class: tab === t[0] ? "on" : "", onclick: function () { params.tab = t[0]; setParams(params); route(); } }, t[1]);
+    })));
+    if (tab === "progress") {
+      var bar0 = h("div", { class: "bar noprint" }, h("span", { class: "sp" }),
+        h("button", { onclick: function () { download("/api/reports/ktp_progress", { year_id: yid(), format: "xlsx" }); } }, "Excel"),
+        h("button", { onclick: function () { window.print(); } }, "Печать"));
+      $main.appendChild(bar0);
+      $main.appendChild(reportTable(await GET("/api/reports/ktp_progress", { year_id: yid() })));
+      return;
+    }
+    var bar = h("div", { class: "bar" }); $main.appendChild(bar);
+    var area = h("div"); $main.appendChild(area);
+    bar.appendChild(await assignmentPicker(params, function (v) { params.aid = v; setParams(params); load(); }));
+    var K = null, items = [], dirty = false;
+    window.onbeforeunload = null;
+
+    function markDirty() { dirty = true; saveBtn && (saveBtn.disabled = false); }
+    var saveBtn = null;
+
+    var load = safe(async function () {
+      clear(area);
+      if (!params.aid) { area.appendChild(h("div", { class: "card muted" }, "Выберите класс и предмет.")); return; }
+      K = await GET("/api/assignments/" + params.aid + "/ktp");
+      items = K.items.map(function (x) { return Object.assign({}, x); });
+      dirty = false;
+      render();
+    });
+
+    function render() {
+      clear(area);
+      var a = K.assignment, st = K.stats, edit = K.can_edit;
+      saveBtn = h("button", { class: "pri", disabled: !dirty, onclick: safe(save) }, "Сохранить");
+      area.appendChild(h("div", { class: "card" },
+        h("div", { class: "bar" }, h("b", null, a.class_name + " · " + a.subject + (a.group_name ? " (" + a.group_name + ")" : "")), h("span", { class: "muted" }, a.teacher || ""), h("span", { class: "sp" }),
+          h("span", { class: "pill " + (st.items ? "ok" : "warn") }, st.items ? "Тем: " + st.items + ", часов: " + String(st.hours).replace(".", ",") : "КТП не загружено"),
+          st.items ? h("span", { class: "pill" }, "Проведено по КТП: " + st.lessons_linked + " из " + st.lessons_total + " уроков в журнале") : null),
+        edit ? h("div", { class: "bar", style: { marginTop: "8px" } },
+          h("button", { onclick: safe(fromFile) }, "Загрузить из файла…"),
+          h("button", { onclick: pasteDialog }, "Вставить текст…"),
+          h("button", { onclick: safe(copyDialog) }, "Скопировать из другого класса…"),
+          h("button", { onclick: function () { items.push({ topic: "", hours: 1, planned_date: "", section: items.length ? items[items.length - 1].section : "", done: [] }); markDirty(); render(); focusLast(); } }, "+ Строка"),
+          h("span", { class: "sp" }),
+          items.length ? h("button", { onclick: function () { download("/api/assignments/" + params.aid + "/ktp/xlsx"); } }, "Excel") : null,
+          saveBtn) : null,
+        h("div", { class: "hint" }, "Поддерживаются таблицы Word (.docx), Excel (.xlsx, .xls), CSV и простой список «1. Тема урока». ",
+          "Столбцы (№, тема, количество часов, дата) определяются автоматически; строки-разделы («Раздел 1. …») запоминаются как названия разделов.")));
+      if (!items.length) { area.appendChild(h("div", { class: "card muted" }, edit ? "Загрузите КТП из файла, вставьте список тем или скопируйте из другого класса." : "КТП для этого предмета не загружено.")); return; }
+      var lastSection = null;
+      var rows = [];
+      items.forEach(function (it, i) {
+        if (it.section && it.section !== lastSection) rows.push(h("tr", { class: "grp" }, h("td", { colspan: 7 }, it.section)));
+        lastSection = it.section;
+        var inp = function (key, attrs) {
+          var e = h("input", Object.assign({ value: it[key] === undefined || it[key] === null ? "" : String(it[key]), disabled: !edit }, attrs || {}));
+          e.oninput = function () { it[key] = e.value; markDirty(); };
+          return e;
+        };
+        var isNext = K.next_id && it.id === K.next_id;
+        rows.push(h("tr", { class: isNext ? "ktp-next" : "" },
+          h("td", { class: "n" }, i + 1),
+          h("td", null, inp("topic", { class: "ktp-topic", placeholder: "Тема урока" })),
+          h("td", null, inp("hours", { class: "ktp-h", inputmode: "decimal" })),
+          h("td", null, inp("planned_date", { type: "date", class: "ktp-d" })),
+          h("td", { class: "muted", style: { fontSize: "12px" } }, (it.done || []).map(fmtDate).join(", ") + (isNext ? (it.done && it.done.length ? " · " : "") + "следующая" : "")),
+          h("td", null, inp("section", { class: "ktp-s", placeholder: "Раздел" })),
+          h("td", null, edit ? h("a", { href: "javascript:void 0", title: "Удалить строку", onclick: function () {
+            if ((it.done || []).length && !confirmBox("Тема уже использована в журнале (" + it.done.map(fmtDate).join(", ") + "). Удалить строку? Темы уроков в журнале сохранятся.")) return;
+            items.splice(i, 1); markDirty(); render();
+          } }, "✕") : null)));
+      });
+      area.appendChild(h("div", { class: "card tw" }, h("table", { class: "t ktp" },
+        h("thead", null, h("tr", null, ["№", "Тема урока", "Часов", "Дата по плану", "Проведено (журнал)", "Раздел", ""].map(function (x) { return h("th", null, x); }))),
+        h("tbody", null, rows))));
+    }
+    function focusLast() { var l = area.querySelectorAll("input.ktp-topic"); if (l.length) l[l.length - 1].focus(); }
+
+    async function save() {
+      K = await PUT("/api/assignments/" + params.aid + "/ktp", { items: items.map(function (x) { return { id: x.id, topic: x.topic, hours: x.hours, planned_date: x.planned_date, section: x.section, note: x.note || "" }; }) });
+      items = K.items.map(function (x) { return Object.assign({}, x); }); dirty = false; render(); toast("КТП сохранено");
+    }
+
+    function norm(t) { return String(t || "").toLowerCase().replace(/ё/g, "е").replace(/[^a-zа-я0-9іў]+/g, " ").trim(); }
+    function applyParsed(parsed, notes) {
+      var hasLinks = items.some(function (x) { return (x.done || []).length; });
+      var body = h("div", null,
+        h("div", { class: "hint" }, notes.join(". ") + "."),
+        h("div", { style: { maxHeight: "50vh", overflow: "auto", marginTop: "8px" } }, h("table", { class: "t" },
+          h("thead", null, h("tr", null, ["№", "Раздел", "Тема", "Ч.", "Дата"].map(function (x) { return h("th", null, x); }))),
+          h("tbody", null, parsed.slice(0, 400).map(function (x) {
+            return h("tr", null, h("td", { class: "n" }, x.num), h("td", { class: "muted" }, x.section || ""), h("td", null, x.topic), h("td", { class: "n" }, String(x.hours).replace(".", ",")), h("td", null, fmtDate(x.planned_date)));
+          })))),
+        h("p", null, "Найдено уроков: " + parsed.length + "."));
+      var btns = [{ text: items.length ? "Заменить текущее КТП" : "Загрузить", cls: "pri", fn: function () {
+        // сохранить связи с уроками журнала для совпадающих тем
+        var byTopic = {};
+        items.forEach(function (x) { if (x.id) byTopic[norm(x.topic)] = byTopic[norm(x.topic)] || x; });
+        items = parsed.map(function (p) { var old = byTopic[norm(p.topic)]; delete byTopic[norm(p.topic)]; return Object.assign({ done: old ? old.done : [] }, p, old ? { id: old.id } : {}); });
+        markDirty(); render(); toast("Проверьте список и нажмите «Сохранить»");
+      } }];
+      if (items.length) btns.push({ text: "Добавить в конец", fn: function () { items = items.concat(parsed.map(function (p) { return Object.assign({ done: [] }, p); })); markDirty(); render(); toast("Проверьте список и нажмите «Сохранить»"); } });
+      if (hasLinks) body.appendChild(h("div", { class: "hint" }, "При замене связь с уроками журнала сохраняется для тем, которые совпадают по тексту."));
+      modal("Загрузка КТП", body, btns);
+    }
+    async function fromFile() {
+      var fs = await pickFile(".docx,.xlsx,.xls,.csv,.txt"); if (!fs.length) return;
+      var r = await POST("/api/ktp/parse", { filename: fs[0].name, data: await fileToB64(fs[0]) });
+      applyParsed(r.items, r.notes);
+    }
+    function pasteDialog() {
+      var ta = h("textarea", { rows: 14, style: { width: "100%" }, placeholder: "Вставьте сюда таблицу из Word или Excel (Ctrl+V) или список тем, по одной в строке:\n1. Тема первого урока\n2. Тема второго урока (2 ч)" });
+      modal("Вставить темы уроков", h("div", null, ta), [{ text: "Распознать", cls: "pri", fn: async function () {
+        if (!ta.value.trim()) return false;
+        var r = await POST("/api/ktp/parse", { text: ta.value });
+        setTimeout(function () { applyParsed(r.items, r.notes); }, 0);
+      } }]);
+      setTimeout(function () { ta.focus(); }, 50);
+    }
+    async function copyDialog() {
+      var src = await GET("/api/assignments/" + params.aid + "/ktp/sources");
+      if (!src.length) { toast("Нет КТП по этому предмету в других классах", true); return; }
+      var s = sel(src.map(function (x) { return [x.id, x.title]; }), src[0].id, { style: { width: "100%" } });
+      modal("Скопировать КТП", h("div", null, h("p", null, "Источник:"), s, h("div", { class: "hint" }, "Будут скопированы темы, часы, разделы и плановые даты. Даты можно затем поправить.")),
+        [{ text: "Скопировать", cls: "pri", fn: async function () {
+          var r = await GET("/api/assignments/" + s.value + "/ktp");
+          setTimeout(function () { applyParsed(r.items.map(function (x) { return { num: x.num, topic: x.topic, hours: x.hours, planned_date: x.planned_date, section: x.section }; }), ["Источник: " + s.options[s.selectedIndex].text]); }, 0);
+        } }]);
+    }
+    load();
+  };
+
+  // ===================================================================== табели успеваемости
+  function lsGet(k, d) { try { var v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* хранилище недоступно */ } }
+
+  ROUTES.cards = async function (params) {
+    await loadPeriods();
+    head("Табели успеваемости для родителей", "По два табеля на листе A4 (альбомная ориентация) — после печати разрежьте лист пополам");
+    var classes = await GET("/api/classes", { year_id: yid() });
+    if (!classes.length) { $main.appendChild(h("div", { class: "card muted" }, "Нет доступных классов.")); return; }
+    var own = classes.filter(function (c) { return S.me.user.own_classes.indexOf(c.id) >= 0; });
+    var cs = sel(classes.map(function (c) { return [c.id, c.name + " класс"]; }), params.cid || (own[0] || classes[0]).id);
+    var ctrl = h("div", { class: "card noprint" });
+    var area = h("div", { class: "rcards-wrap" });
+    $main.appendChild(h("div", { class: "bar noprint" }, cs, h("span", { class: "sp" }),
+      h("button", { class: "pri", onclick: function () { window.print(); } }, "Печать")));
+    $main.appendChild(ctrl); $main.appendChild(area);
+    var data = null, chosenKinds = null, chosenStudents = null;
+    var msg = h("textarea", { rows: 2, style: { width: "100%" }, placeholder: "Например: Родительское собрание состоится 20 ноября в 18:00 в кабинете 12." });
+    msg.value = lsGet("sg_card_msg", "");
+    var showAbs = h("input", { type: "checkbox" }), showAvg = h("input", { type: "checkbox" }), showSign = h("input", { type: "checkbox" });
+    showAvg.checked = lsGet("sg_card_avg", "1") === "1"; showSign.checked = lsGet("sg_card_sign", "1") === "1";
+
+    function defaultKinds(all) {
+      var cur = curKind(), order = all.map(function (k) { return k.kind; });
+      var upto = order.indexOf(cur);
+      return all.filter(function (k, i) { return /^(q|h)/.test(k.kind) ? i <= upto : k.kind === "year"; }).map(function (k) { return k.kind; });
+    }
+
+    var load = safe(async function () {
+      params.cid = cs.value; setParams(params);
+      var first = await GET("/api/classes/" + cs.value + "/report_cards");
+      chosenKinds = chosenKinds || defaultKinds(first.all_kinds);
+      if (!chosenStudents || chosenStudents.cid !== cs.value) chosenStudents = { cid: cs.value, ids: first.students.map(function (s) { return s.id; }) };
+      if (showAbs.dataset.init !== "1") { showAbs.checked = first.has_journal; showAbs.dataset.init = "1"; }
+      data = first;
+      renderCtrl(); renderCards();
+    });
+
+    function renderCtrl() {
+      clear(ctrl);
+      var kb = data.all_kinds.map(function (k) {
+        var cb = h("input", { type: "checkbox" }); cb.checked = chosenKinds.indexOf(k.kind) >= 0;
+        cb.onchange = function () {
+          chosenKinds = data.all_kinds.filter(function (x) { return x.kind === k.kind ? cb.checked : chosenKinds.indexOf(x.kind) >= 0; }).map(function (x) { return x.kind; });
+          renderCards();
+        };
+        return h("label", { class: "chk" }, cb, " " + k.name);
+      });
+      var sb = data.students.map(function (st) {
+        var cb = h("input", { type: "checkbox" }); cb.checked = chosenStudents.ids.indexOf(st.id) >= 0;
+        cb.onchange = function () {
+          chosenStudents.ids = data.students.filter(function (x) { return x.id === st.id ? cb.checked : chosenStudents.ids.indexOf(x.id) >= 0; }).map(function (x) { return x.id; });
+          renderCards();
+        };
+        return h("label", { class: "chk" }, cb, " " + st.name.split(" ").slice(0, 2).join(" "));
+      });
+      [showAbs, showAvg, showSign].forEach(function (c) { c.onchange = function () { lsSet("sg_card_avg", showAvg.checked ? "1" : "0"); lsSet("sg_card_sign", showSign.checked ? "1" : "0"); renderCards(); }; });
+      msg.oninput = function () { lsSet("sg_card_msg", msg.value); renderCards(); };
+      ctrl.appendChild(h("div", null, h("b", null, "Периоды: "), h("span", { class: "chkrow", style: { display: "inline-flex" } }, kb)));
+      ctrl.appendChild(h("div", { class: "chkrow" }, h("label", { class: "chk" }, showAvg, " Средний балл"),
+        h("label", { class: "chk" }, showAbs, " Пропущено уроков (по журналу)"), h("label", { class: "chk" }, showSign, " Строка для подписи родителей")));
+      ctrl.appendChild(h("details", null, h("summary", null, "Учащиеся (" + chosenStudents.ids.length + " из " + data.students.length + ")"),
+        h("div", { class: "bar", style: { margin: "6px 0" } },
+          h("button", { onclick: function () { chosenStudents.ids = data.students.map(function (x) { return x.id; }); renderCtrl(); renderCards(); } }, "Выбрать всех"),
+          h("button", { onclick: function () { chosenStudents.ids = []; renderCtrl(); renderCards(); } }, "Снять выбор")),
+        h("div", { class: "chkrow" }, sb)));
+      ctrl.appendChild(h("div", { style: { marginTop: "6px" } }, h("b", null, "Сообщение для родителей (печатается во всех табелях):"), msg));
+    }
+
+    function card(st) {
+      var ks = data.kinds.length ? data.kinds : [];
+      ks = data.all_kinds.filter(function (k) { return chosenKinds.indexOf(k.kind) >= 0; });
+      var head = h("tr", null, h("th", { class: "subj" }, "Учебный предмет"), ks.map(function (k) { return h("th", null, k.name.replace(" четверть", " четв.").replace(" полугодие", " полуг.")); }));
+      var body = st.rows.map(function (r) {
+        return h("tr", null, h("td", { class: "subj" }, r.subject), ks.map(function (k) { var v = r.marks[k.kind] || ""; return h("td", { class: "m " + lvClass(v) }, v); }));
+      });
+      if (showAvg.checked) body.push(h("tr", { class: "sum" }, h("td", { class: "subj" }, "Средний балл"), ks.map(function (k) { return h("td", { class: "m" }, st.avg[k.kind] || ""); })));
+      body.push(h("tr", { class: "sum" }, h("td", { class: "subj" }, "Поведение"), ks.map(function (k) { return h("td", { class: "m" }, st.behavior[k.kind] || ""); })));
+      if (showAbs.checked) body.push(h("tr", { class: "sum" }, h("td", { class: "subj" }, "Пропущено уроков"), ks.map(function (k) { var v = st.absent[k.kind]; return h("td", { class: "m" }, v === "" || v === undefined ? "" : String(v)); })));
+      if (showSign.checked) body.push(h("tr", { class: "sign" }, h("td", { class: "subj" }, "Подпись родителей"), ks.map(function () { return h("td", null, ""); })));
+      return h("div", { class: "rcard" },
+        h("div", { class: "rc-school" }, data.school),
+        h("div", { class: "rc-title" }, "ТАБЕЛЬ УСПЕВАЕМОСТИ"),
+        h("div", { class: "rc-who" }, h("b", null, st.name)),
+        h("div", { class: "rc-sub" }, (st.gender === "ж" ? "учащаяся " : st.gender === "м" ? "учащийся " : "учащийся(-аяся) ") + data.class + " класса, " + data.year + " учебный год"),
+        h("table", { class: "rc-t" }, h("thead", null, head), h("tbody", null, body)),
+        msg.value.trim() ? h("div", { class: "rc-msg" }, msg.value.trim()) : null,
+        h("div", { class: "rc-foot" }, "Классный руководитель ________________ " + (data.teacher ? data.teacher.split(" ").length > 2 ? data.teacher.split(" ")[0] + " " + data.teacher.split(" ")[1][0] + "." + data.teacher.split(" ")[2][0] + "." : data.teacher : "")));
+    }
+
+    function renderCards() {
+      clear(area);
+      var list = data.students.filter(function (s) { return chosenStudents.ids.indexOf(s.id) >= 0; });
+      if (!list.length) { area.appendChild(h("div", { class: "card muted noprint" }, "Не выбрано ни одного учащегося.")); return; }
+      if (!chosenKinds.length) { area.appendChild(h("div", { class: "card muted noprint" }, "Выберите хотя бы один период.")); return; }
+      for (var i = 0; i < list.length; i += 2) {
+        area.appendChild(h("div", { class: "rpage" }, card(list[i]), list[i + 1] ? card(list[i + 1]) : h("div", { class: "rcard empty" })));
+      }
+    }
+    cs.onchange = function () { chosenStudents = null; load(); };
+    load();
+  };
+
+  // ===================================================================== контроль накопляемости
+  ROUTES.control = async function (params) {
+    await loadPeriods();
+    head("Контроль накопляемости отметок", S.me.user.can_manage || S.me.user.role === "viewer" ? "Все классы и предметы" : "Ваши предметы и ваш класс");
+    var qk = kindsOf().filter(function (k) { return /^(q[1-4]|h[12])$/.test(k[0]); });
+    var classes = await GET("/api/classes", { year_id: yid() });
+    var ks = sel(qk, params.kind || curKind());
+    var cs = sel([["", "Все доступные классы"]].concat(classes.map(function (c) { return [c.id, c.name + " класс"]; })), params.cid || "");
+    var area = h("div");
+    function args() { return { year_id: yid(), kind: ks.value, class_id: cs.value }; }
+    var load = safe(async function () {
+      params.kind = ks.value; params.cid = cs.value; setParams(params);
+      clear(area).appendChild(h("div", { class: "card muted" }, "Проверка…"));
+      var r = await GET("/api/reports/accumulation", args());
+      clear(area);
+      var pills = h("div", { class: "bar" }, Object.keys(r.counts).map(function (k) {
+        var n = r.counts[k];
+        return h("span", { class: "pill " + (n ? "warn" : "ok") }, r.issue_names[k] + ": " + n);
+      }));
+      area.appendChild(h("div", { class: "card noprint" }, pills,
+        h("div", { class: "hint" }, "«Мало текущих отметок»: пока период идёт, ожидаемое количество растёт пропорционально прошедшим дням; за 10 дней до окончания и позже требуется полный минимум. ",
+          "Проверка отметок за период выполняется после окончания периода.")));
+      area.appendChild(reportTable(r));
+    });
+    ks.onchange = load; cs.onchange = load;
+    $main.appendChild(h("div", { class: "bar noprint" }, ks, cs, h("span", { class: "sp" }),
+      h("button", { onclick: function () { download("/api/reports/accumulation", Object.assign(args(), { format: "xlsx" })); } }, "Excel"),
+      h("button", { onclick: function () { window.print(); } }, "Печать")));
+    $main.appendChild(area);
+    load();
   };
 
   // ===================================================================== выбор предмета-класса
@@ -406,6 +693,10 @@
     bar.appendChild(cs); bar.appendChild(ps);
     var load = safe(async function () {
       clear(area);
+      if (params.aid && !params.cid) {   // ссылка вида #/journal?aid=… (с главной страницы)
+        var J0 = await GET("/api/journal/" + params.aid, { period: ps.value });
+        params.cid = String(J0.assignment.class_id); cs.value = params.cid; setParams(params);
+      }
       if (!params.cid) { area.appendChild(h("div", { class: "card muted" }, "Выберите класс.")); return; }
       var asg = await GET("/api/assignments", { class_id: params.cid });
       // предметы класса плиткой
@@ -507,12 +798,32 @@
     var t = inputs[r + dr] && inputs[r + dr][c + dc];
     if (t) { e.preventDefault(); if (e.key === "Enter") e.target.blur(); t.focus(); }
   }
-  function lessonDialog(aid, l, reload) {
+  async function lessonDialog(aid, l, reload) {
     var data = l || { date: new Date().toISOString().slice(0, 10) };
+    var K = null;
+    try { K = await GET("/api/assignments/" + aid + "/ktp"); } catch (e) { K = null; }
     var f = buildForm([{ k: "date", label: "Дата", type: "date" }, { k: "work_type", label: "Вид работы", type: "list", options: ["контрольная работа", "самостоятельная работа", "диктант", "изложение", "сочинение", "тест", "лабораторная работа", "практическая работа", "зачёт", "проверочная работа"] },
       { k: "topic", label: "Тема урока", wide: true }, { k: "homework", label: "Домашнее задание", wide: true }], data);
+    var ksel = null;
+    if (K && K.items.length) {
+      var curId = l ? (l.ktp_id || "") : (K.next_id || "");
+      ksel = sel([["", "— тема не из КТП —"]].concat(K.items.map(function (it) {
+        var used = (it.done || []).filter(function (d) { return !l || d !== l.date || it.id !== l.ktp_id; });
+        return [it.id, it.num + ". " + it.topic + (used.length ? "  ✓ " + used.map(fmtDate).join(", ") : "")];
+      })), curId, { style: { width: "100%" } });
+      var topicInp = f.inputs.topic;
+      var syncTopic = function () {
+        var it = K.items.filter(function (x) { return String(x.id) === ksel.value; })[0];
+        if (it && topicInp) topicInp.value = it.topic;
+      };
+      ksel.onchange = syncTopic;
+      if (!l && curId) syncTopic();
+      f.insertBefore(field("Тема из календарно-тематического планирования", ksel, "wide"), f.firstChild);
+    }
     var btns = [{ text: "Сохранить", cls: "pri", fn: async function () {
-      if (l) await PUT("/api/lessons/" + l.id, f.values()); else await POST("/api/journal/" + aid + "/lessons", f.values());
+      var v = f.values();
+      if (ksel) v.ktp_id = ksel.value ? Number(ksel.value) : null;
+      if (l) await PUT("/api/lessons/" + l.id, v); else await POST("/api/journal/" + aid + "/lessons", v);
       reload();
     } }];
     if (l) btns.push({ text: "Удалить урок", cls: "danger", fn: async function () {
@@ -1190,10 +1501,113 @@
   };
 
   // ===================================================================== администрирование
+  // ---------------------------------------------------------------- импорт из «Старт ШКОЛА»
+  async function startSchoolImport() {
+    var st = await GET("/api/import/startschool");
+    var box = h("div");
+    $main.appendChild(box);
+    var opts = { kinds: st.kinds.map(function (k) { return k.kind; }), overwrite: false, passport: true, staff: true, create_teachers: true };
+    var previewOk = false;
+
+    function render() {
+      clear(box);
+      box.appendChild(h("div", { class: "card" },
+        h("h2", { style: { marginTop: 0 } }, "Перенос данных из «Старт ШКОЛА»"),
+        h("p", null, "Добавьте книги Excel из папки «Старт ШКОЛА»: главную книгу «Старт ШКОЛА.xls» (паспорт учреждения, классы и классные руководители, сотрудники) ",
+          "и книги параллелей «Параллель_1.xls» … «Параллель_11.xls» (списки учащихся и отметки за четверти и год). Можно добавить только часть файлов."),
+        h("p", { class: "hint" }, "Учащиеся сопоставляются по фамилии и имени, в том числе с небольшими опечатками. Перед импортом можно посмотреть, что изменится; ",
+          "перед записью автоматически создаётся резервная копия базы. Отметки переносятся в текущий учебный год."),
+        h("div", { class: "bar" },
+          h("button", { class: "pri", onclick: safe(addFiles) }, "Добавить файлы…"),
+          st.files.length ? h("button", { onclick: safe(async function () { await DEL("/api/import/startschool"); st.files = []; previewOk = false; render(); }) }, "Очистить список") : null),
+        st.files.length ? h("table", { class: "t", style: { marginTop: "10px" } },
+          h("thead", null, h("tr", null, h("th", null, "Файл"), h("th", null, "Содержимое"))),
+          h("tbody", null, st.files.map(function (f) { return h("tr", null, h("td", null, f.file), h("td", null, f.text)); })))
+          : h("div", { class: "muted", style: { marginTop: "8px" } }, "Файлы ещё не добавлены.")));
+      if (!st.files.length) return;
+      var kindBoxes = st.kinds.map(function (k) {
+        var cb = h("input", { type: "checkbox" }); cb.checked = opts.kinds.indexOf(k.kind) >= 0;
+        cb.onchange = function () { opts.kinds = st.kinds.filter(function (x, i) { return kindBoxes[i].querySelector("input").checked; }).map(function (x) { return x.kind; }); previewOk = false; renderResult(null); };
+        return h("label", { class: "chk" }, cb, " " + k.name);
+      });
+      function flag(key, text) {
+        var cb = h("input", { type: "checkbox" }); cb.checked = !!opts[key];
+        cb.onchange = function () { opts[key] = cb.checked; previewOk = false; renderResult(null); };
+        return h("label", { class: "chk" }, cb, " " + text);
+      }
+      box.appendChild(h("div", { class: "card" }, h("h3", { style: { marginTop: 0 } }, "Что переносить"),
+        h("div", { class: "chkrow" }, kindBoxes),
+        h("div", { class: "chkrow" }, flag("overwrite", "Заменять отметки, которые в SchoolGrade уже выставлены и отличаются"),
+          flag("passport", "Заполнить пустые поля паспорта учреждения"), flag("staff", "Добавить сотрудников из главной книги"),
+          flag("create_teachers", "Добавлять учителей, которых нет среди сотрудников (по фамилии и инициалам)")),
+        h("div", { class: "bar", style: { marginTop: "10px" } },
+          h("button", { class: "pri", onclick: safe(async function () { renderResult(await POST("/api/import/startschool/preview", opts), true); }) }, "Проверить, что изменится"))));
+      resBox = h("div"); box.appendChild(resBox);
+    }
+    var resBox = null;
+
+    function renderResult(r, isPreview) {
+      if (!resBox) return;
+      clear(resBox);
+      if (!r) return;
+      previewOk = !!isPreview;
+      var S1 = r.summary;
+      var lines = [["Классы", S1.classes_new + " новых, " + S1.classes_existing + " уже есть"],
+        ["Учащиеся", S1.students_new + " новых, " + S1.students_matched + " найдено по ФИО" + (S1.students_fuzzy ? ", " + S1.students_fuzzy + " — с исправлением опечаток" : "")],
+        ["Сотрудники", S1.staff_new + " новых"], ["Предметы", S1.subjects_new + " новых"],
+        ["Нагрузка", S1.assignments_new + " новых предметов в классах" + (S1.groups ? ", " + S1.groups + " групп по иностранному языку" : "")],
+        ["Паспорт учреждения", S1.passport_fields + " полей заполнено"]];
+      Object.keys(r.marks).forEach(function (k) {
+        var m = r.marks[k], kn = (st.kinds.filter(function (x) { return x.kind === k; })[0] || {}).name || k;
+        var parts = [m.new + " новых", m.same + " совпадают"];
+        if (m.replaced) parts.push(m.replaced + " заменено");
+        if (m.diff_kept) parts.push(m.diff_kept + " отличаются (оставлены)");
+        if (m.locked) parts.push(m.locked + " в закрытом периоде");
+        if (m.new + m.same + m.replaced + m.diff_kept + m.locked) lines.push(["Отметки: " + kn, parts.join(", ")]);
+      });
+      resBox.appendChild(h("div", { class: "card" },
+        h("h3", { style: { marginTop: 0 } }, isPreview ? "Предварительный просмотр (база пока не изменена)" : "Импорт выполнен"),
+        r.backup ? h("p", { class: "hint" }, "Резервная копия до импорта: " + r.backup + " (Администрирование → Резервные копии).") : null,
+        h("table", { class: "t" }, h("tbody", null, lines.map(function (l) { return h("tr", null, h("th", { style: { textAlign: "left", width: "260px" } }, l[0]), h("td", null, l[1])); }))),
+        r.warnings.length ? h("div", { class: "warnbox" }, h("b", null, "Обратите внимание"), h("ul", null, r.warnings.map(function (w) { return h("li", null, w); }))) : null,
+        h("h3", null, "По классам"),
+        h("table", { class: "t" }, h("thead", null, h("tr", null, ["Класс", "", "Кл. руководитель", "Учащихся в файле", "Новых", "Отметок", "Сопоставлено с исправлением"].map(function (x) { return h("th", null, x); }))),
+          h("tbody", null, r.classes.map(function (c) {
+            var nm = Object.keys(c.marks).reduce(function (a, k) { return a + c.marks[k]; }, 0);
+            return h("tr", null, h("td", null, c.name), h("td", null, h("span", { class: "pill " + (c.status === "новый" ? "warn" : "ok") }, c.status)), h("td", null, c.teacher),
+              h("td", { class: "n" }, c.students), h("td", { class: "n" }, c.new_students || ""), h("td", { class: "n" }, nm || ""), h("td", null, c.fuzzy.join("; ")));
+          }))),
+        r.log.length ? h("details", { style: { marginTop: "10px" } }, h("summary", null, "Подробный протокол (" + r.log.length + ")"),
+          h("pre", { class: "log" }, r.log.join("\n"))) : null,
+        isPreview ? h("div", { class: "bar", style: { marginTop: "12px" } }, h("button", { class: "pri", onclick: safe(async function () {
+          if (!previewOk) { toast("Параметры изменились — проверьте ещё раз"); return; }
+          if (!confirmBox("Выполнить импорт? Перед записью будет создана резервная копия базы.")) return;
+          var res = await POST("/api/import/startschool/commit", opts);
+          st.files = []; render(); renderResult(res, false); toast("Импорт выполнен");
+        }) }, "Импортировать")) : null));
+      resBox.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+
+    async function addFiles() {
+      var fs = await pickFile(".xls", true); if (!fs.length) return;
+      var prog = h("div", { class: "pill warn", style: { marginTop: "8px", display: "inline-block" } });
+      box.firstChild.appendChild(prog);
+      for (var i = 0; i < fs.length; i++) {
+        prog.textContent = "Чтение файла " + (i + 1) + " из " + fs.length + ": " + fs[i].name + "…";
+        try {
+          st = Object.assign(st, await POST("/api/import/startschool/file", { filename: fs[i].name, data: await fileToB64(fs[i]) }));
+        } catch (e) { toast(e.message || String(e), true); }
+      }
+      previewOk = false; render();
+    }
+    render();
+  }
+
   ROUTES.admin = async function (params) {
     head("Администрирование");
     var tab = params.tab || "users";
-    var tabs = [["users", "Пользователи"], ["rules", "Настройки и правила"], ["fields", "Тип и поля"], ["transfer", "Перенос данных"], ["backup", "Резервные копии"], ["audit", "Журнал действий"]];
+    var tabs = [["users", "Пользователи"], ["rules", "Настройки и правила"], ["fields", "Тип и поля"], ["transfer", "Перенос данных"], ["startschool", "Импорт из «Старт ШКОЛА»"], ["backup", "Резервные копии"], ["audit", "Журнал действий"]];
+    if (deptMode()) tabs = tabs.filter(function (t) { return t[0] !== "startschool"; });
     $main.appendChild(h("div", { class: "tabs" }, tabs.map(function (t) {
       return h("a", { href: "javascript:void 0", class: tab === t[0] ? "on" : "", onclick: function () { params.tab = t[0]; setParams(params); route(); } }, t[1]);
     })));
@@ -1264,6 +1678,8 @@
         h("div", { class: "hint" }, "Отмеченные поля убираются из карточек учащихся и сотрудников: их не видят и не заполняют другие пользователи. Фамилия скрыта быть не может.")));
       $main.appendChild(hideCard("students", "Поля учащихся"));
       $main.appendChild(hideCard("staff", "Поля сотрудников"));
+    } else if (tab === "startschool") {
+      await startSchoolImport();
     } else if (tab === "transfer") {
       $main.appendChild(h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Перенос всех настроек и оценок на другой сервер"),
         h("p", null, "Экспорт — один файл .sgdb со всеми данными (пароли — необратимый хэш, персональные данные зашифрованы). Импорт заменяет текущую базу (перед этим создаётся резервная копия)."),

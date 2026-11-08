@@ -602,3 +602,259 @@ def students_list(db, class_id):
         "rows": rows, "widths": [4, 32, 12, 5, 30, 30, 14, 10, 12],
         "footer": ["Документ содержит персональные данные (Закон Республики Беларусь «О защите персональных данных»)."],
     }
+
+
+# ------------------------------------------------------------- контроль накопляемости
+ACC_ISSUES = [
+    ("few", "Мало текущих отметок"),
+    ("stale", "Давно нет записей в журнале"),
+    ("missing", "Не выставлена отметка за период"),
+    ("deviation", "Отметка за период расходится со средним баллом"),
+]
+
+
+def _period(db, year_id, kind):
+    return db.one("SELECT * FROM periods WHERE year_id=? AND kind=?", (year_id, kind)) or {}
+
+
+def current_kind(db, year_id, today=None):
+    """Текущая четверть (полугодие) по датам; после окончания последней — последняя."""
+    import datetime
+    today = today or datetime.date.today().isoformat()
+    ps = [p for p in db.q("SELECT * FROM periods WHERE year_id=? AND start_date<>'' ORDER BY start_date", (year_id,))
+          if p["kind"] in ("q1", "q2", "q3", "q4", "h1", "h2")]
+    cur = ps[0]["kind"] if ps else "q1"
+    for p in ps:
+        if p["start_date"] <= today:
+            cur = p["kind"]
+    return cur
+
+
+def accumulation(db, year_id, kind, assignments, journal_on, stale_days=14, today=None):
+    """Контроль накопляемости отметок по списку нагрузок (assignments — строки
+    assignments с полями subject, class_id, hours, teacher_*).
+    Возвращает отчёт: строки «класс — предмет — проблема — учащиеся»."""
+    import datetime
+    rl = rules(db)
+    today = today or datetime.date.today().isoformat()
+    p = _period(db, year_id, kind)
+    ps, pe = p.get("start_date") or "", p.get("end_date") or ""
+    started = bool(ps) and ps <= today
+    ended = bool(pe) and pe < today
+    days_left = None
+    if pe and not ended:
+        try:
+            days_left = (datetime.date.fromisoformat(pe) - datetime.date.fromisoformat(max(today, ps or today))).days
+        except ValueError:
+            days_left = None
+    stale_border = (datetime.date.fromisoformat(today) - datetime.timedelta(days=stale_days)).isoformat()
+    rows, counts = [], dict((k, 0) for k, _ in ACC_ISSUES)
+    classes = {}
+    for a in sorted(assignments, key=lambda x: (x.get("grade") or 0, x.get("letter") or "", x.get("subject") or "")):
+        if (a.get("category") or "subject") != "subject" or a.get("eval_type") not in (None, "", "points"):
+            continue
+        if (a.get("grade") or 0) <= 2:   # I–II классы — безотметочное обучение
+            continue
+        if a["class_id"] not in classes:
+            classes[a["class_id"]] = get_class(db, a["class_id"])
+        cname = class_name(classes[a["class_id"]])
+        studs = assignment_students(db, a)
+        if not studs:
+            continue
+        teacher = teacher_of(a)
+        subj = a["subject"] + (" (" + a["group_name"] + ")" if a.get("group_name") else "")
+        need = rl["min_marks_quarter_1h"] if (a.get("hours") and float(a["hours"]) <= 1) else rl["min_marks_quarter"]
+        cur = {}
+        last_date = ""
+        if journal_on and ps and pe:
+            lessons = db.q("SELECT id, date FROM lessons WHERE assignment_id=? AND date>=? AND date<=?", (a["id"], ps, pe))
+            last_date = max([l["date"] for l in lessons] or [""])
+            if lessons:
+                ph = ",".join("?" * len(lessons))
+                for m in db.q("SELECT student_id, value FROM marks WHERE lesson_id IN (%s)" % ph, [l["id"] for l in lessons]):
+                    cur.setdefault(m["student_id"], []).append(m["value"])
+            # 1) мало текущих отметок
+            # пока период идёт, ожидаемый минимум растёт пропорционально прошедшему времени;
+            # полный минимум — за 10 дней до окончания и позже
+            expect = need
+            if started and not ended and days_left is not None and days_left > 10:
+                try:
+                    total = (datetime.date.fromisoformat(pe) - datetime.date.fromisoformat(ps)).days or 1
+                    expect = int(need * (total - days_left) / float(total))
+                except ValueError:
+                    expect = need
+            if started and expect > 0:
+                few = []
+                for s in studs:
+                    pts = [v for v in cur.get(s["id"], []) if G.is_point(v)]
+                    if len(pts) < expect:
+                        few.append("%s — %d" % (fio(s), len(pts)))
+                if few:
+                    note = ("нужно не менее %d" % need if expect >= need else
+                            "к этой дате ожидается не менее %d из %d" % (expect, need)) + \
+                        (", до конца периода %d дн." % days_left if days_left is not None else "")
+                    rows.append([cname, subj, teacher, "Мало текущих отметок (%s)" % note, len(few), "; ".join(few)])
+                    counts["few"] += len(few)
+            # 2) давно нет записей
+            if started and not ended and ps <= stale_border and (not last_date or last_date < stale_border):
+                rows.append([cname, subj, teacher, "Нет записей в журнале более %d дней" % stale_days, "",
+                             "последний урок: " + (_ru_date(last_date) if last_date else "уроков в этом периоде нет")])
+                counts["stale"] += 1
+        # 3) не выставлена отметка за период / 4) расхождение
+        fin = dict((r["student_id"], r) for r in db.q("SELECT student_id, value, excused FROM final_marks WHERE assignment_id=? AND kind=?",
+                                                       (a["id"], kind)))
+        if ended:
+            miss = [fio(s) for s in studs if s["id"] not in fin]
+            if miss:
+                rows.append([cname, subj, teacher, "Не выставлена отметка за период", len(miss), "; ".join(miss)])
+                counts["missing"] += len(miss)
+        if journal_on:
+            dev = []
+            for s in studs:
+                f = fin.get(s["id"])
+                pts = [int(v) for v in cur.get(s["id"], []) if G.is_point(v)]
+                if f and G.is_point(f["value"]) and len(pts) >= 2:
+                    avg = sum(pts) / float(len(pts))
+                    if abs(int(f["value"]) - avg) > 1.0:
+                        dev.append("%s — %s при среднем %s" % (fio(s), f["value"], fmt(avg, 2)))
+            if dev:
+                rows.append([cname, subj, teacher, "Отметка за период расходится со средним баллом текущих более чем на 1", len(dev), "; ".join(dev)])
+                counts["deviation"] += len(dev)
+    head = "{}\n{} учебный год, {}".format(school_name(db), (db.one("SELECT name FROM years WHERE id=?", (year_id,)) or {}).get("name", ""),
+                                         kind_title(db, kind).lower())
+    if ps and pe:
+        head += " ({} — {}){}".format(_ru_date(ps), _ru_date(pe), "" if not days_left else ", до окончания %d дн." % days_left)
+    return {
+        "name": "Накопляемость отметок",
+        "title": "Контроль накопляемости отметок",
+        "subtitle": head,
+        "headers": ["Класс", "Предмет", "Учитель", "Замечание", "Уч-ся", "Кого касается"],
+        "rows": rows or [["", "", "", "Замечаний нет", "", ""]],
+        "widths": [8, 22, 18, 34, 6, 70],
+        "counts": counts,
+        "issue_names": dict(ACC_ISSUES),
+        "footer": ["Минимум текущих отметок для отметки за период: {} (для предметов 1 ч в неделю — {}); настраивается в "
+                   "«Администрирование → Настройки и правила». Отметка за период проверяется на отсутствие после окончания периода. "
+                   "I–II классы (безотметочное обучение) не проверяются."
+                   .format(rl["min_marks_quarter"], rl["min_marks_quarter_1h"])] if journal_on else
+                  ["Электронный журнал отключён: проверяется только наличие отметок за период после его окончания. I–II классы (безотметочное обучение) не проверяются."],
+    }
+
+
+def _ru_date(d):
+    p = (d or "").split("-")
+    return "%s.%s.%s" % (p[2], p[1], p[0]) if len(p) == 3 else (d or "")
+
+
+# ------------------------------------------------------------- табель для родителей
+def report_cards(db, class_id, kinds=None, student_ids=None):
+    """Данные для печати табелей успеваемости класса: по одному на учащегося."""
+    c = get_class(db, class_id)
+    y = db.one("SELECT * FROM years WHERE id=?", (c["year_id"],)) or {}
+    all_k = G.all_kinds(y.get("scheme") or "quarters")
+    names = dict(all_k)
+    kinds = [k for k in (kinds or [k for k, _ in all_k]) if k in names]
+    periods = dict((p["kind"], p) for p in db.q("SELECT * FROM periods WHERE year_id=?", (c["year_id"],)))
+    studs = class_students(db, class_id)
+    if student_ids:
+        want = set(int(x) for x in student_ids)
+        studs = [s for s in studs if s["id"] in want]
+    asg = class_assignments(db, class_id, graded_only=True)
+    groups = {}
+    for a in asg:
+        ids = [r["student_id"] for r in db.q("SELECT student_id FROM assignment_students WHERE assignment_id=?", (a["id"],))]
+        groups[a["id"]] = set(ids) if ids else None
+    fm = {}
+    for r in db.q("SELECT f.assignment_id, f.student_id, f.kind, f.value FROM final_marks f JOIN assignments a ON a.id=f.assignment_id "
+                  "WHERE a.class_id=?", (class_id,)):
+        fm[(r["assignment_id"], r["student_id"], r["kind"])] = r["value"]
+    beh = dict(((r["student_id"], r["kind"]), r["value"]) for r in
+               db.q("SELECT student_id, kind, value FROM behavior WHERE class_id=?", (class_id,)))
+    # пропуски по данным журнала за каждый период
+    absent = {}
+    for k in kinds:
+        p = periods.get(k) or {}
+        if p.get("start_date") and p.get("end_date"):
+            for r in db.q("SELECT m.student_id, COUNT(*) n FROM marks m JOIN lessons l ON l.id=m.lesson_id "
+                          "JOIN assignments a ON a.id=l.assignment_id WHERE a.class_id=? AND m.value='н' "
+                          "AND l.date>=? AND l.date<=? GROUP BY m.student_id", (class_id, p["start_date"], p["end_date"])):
+                absent[(r["student_id"], k)] = r["n"]
+    year_absent = dict((r["student_id"], r["n"]) for r in db.q(
+        "SELECT m.student_id, COUNT(*) n FROM marks m JOIN lessons l ON l.id=m.lesson_id JOIN assignments a ON a.id=l.assignment_id "
+        "WHERE a.class_id=? AND m.value='н' GROUP BY m.student_id", (class_id,)))
+    has_journal = bool(db.val("SELECT 1 FROM lessons l JOIN assignments a ON a.id=l.assignment_id WHERE a.class_id=? LIMIT 1", (class_id,)))
+    teacher = db.one("SELECT * FROM staff WHERE id=?", (c.get("teacher_id"),)) if c.get("teacher_id") else None
+    school = db.get_setting("school", {}) or {}
+    out = []
+    for s in studs:
+        rows = []
+        for a in asg:
+            g = groups.get(a["id"])
+            if g is not None and s["id"] not in g:
+                continue
+            marks = dict((k, fm.get((a["id"], s["id"], k), "")) for k in kinds)
+            rows.append({"subject": a["subject"], "marks": marks})
+        avg = {}
+        for k in kinds:
+            pts = [int(r["marks"][k]) for r in rows if G.is_point(r["marks"][k])]
+            avg[k] = fmt(sum(pts) / float(len(pts)), 1) if pts else ""
+        ab = {}
+        for k in kinds:
+            if k in ("year", "exam", "final"):
+                ab[k] = year_absent.get(s["id"], 0) if k == "year" else ""
+            else:
+                ab[k] = absent.get((s["id"], k), 0)
+        out.append({"id": s["id"], "name": fio(s, True), "gender": s.get("gender") or "", "rows": rows, "avg": avg, "absent": ab,
+                    "behavior": dict((k, beh.get((s["id"], k), "")) for k in kinds)})
+    return {
+        "school": school_name(db), "director": school.get("Директор", ""), "year": y.get("name", ""),
+        "class": class_name(c), "teacher": fio(teacher, True) if teacher else "",
+        "kinds": [{"kind": k, "name": names[k]} for k in kinds], "students": out, "has_journal": has_journal,
+        "all_kinds": [{"kind": k, "name": n} for k, n in all_k],
+    }
+
+
+# ------------------------------------------------------------- выполнение программы (КТП)
+def ktp_progress(db, year_id, assignments, today=None):
+    import datetime
+    today = today or datetime.date.today().isoformat()
+    rows = []
+    tot = {"items": 0, "hours": 0.0, "plan": 0.0, "done": 0, "lag": 0.0}
+    no_ktp = 0
+    classes = {}
+    for a in sorted(assignments, key=lambda x: (x.get("grade") or 0, x.get("letter") or "", x.get("subject") or "")):
+        if a["class_id"] not in classes:
+            classes[a["class_id"]] = get_class(db, a["class_id"])
+        items = db.q("SELECT hours, planned_date FROM ktp WHERE assignment_id=?", (a["id"],))
+        done = db.val("SELECT COUNT(*) FROM lessons WHERE assignment_id=? AND date<=?", (a["id"], today)) or 0
+        unlinked = db.val("SELECT COUNT(*) FROM lessons WHERE assignment_id=? AND date<=? AND ktp_id IS NULL", (a["id"], today)) or 0
+        subj = a["subject"] + (" (" + a["group_name"] + ")" if a.get("group_name") else "")
+        if not items:
+            no_ktp += 1
+            rows.append([class_name(classes[a["class_id"]]), subj, teacher_of(a), "КТП не загружено", "", "", done, "", ""])
+            continue
+        hours = sum(float(i["hours"] or 0) for i in items)
+        dated = [i for i in items if i["planned_date"]]
+        plan = sum(float(i["hours"] or 0) for i in dated if i["planned_date"] <= today) if dated else None
+        lag = (plan - done) if plan is not None else None
+        rows.append([class_name(classes[a["class_id"]]), subj, teacher_of(a), len(items), fmt(hours, 1).replace(",0", ""),
+                     "" if plan is None else fmt(plan, 1).replace(",0", ""), done,
+                     "" if lag is None or lag <= 0 else fmt(lag, 1).replace(",0", ""), unlinked or ""])
+        tot["items"] += len(items)
+        tot["hours"] += hours
+        tot["plan"] += plan or 0
+        tot["done"] += done
+        tot["lag"] += lag if lag and lag > 0 else 0
+    rows.append(["ИТОГО", "", "", tot["items"], fmt(tot["hours"], 1).replace(",0", ""), fmt(tot["plan"], 1).replace(",0", ""),
+                 tot["done"], fmt(tot["lag"], 1).replace(",0", "") if tot["lag"] else "", ""])
+    y = db.one("SELECT name FROM years WHERE id=?", (year_id,)) or {}
+    return {
+        "name": "Выполнение программы",
+        "title": "Выполнение учебных программ по календарно-тематическому планированию",
+        "subtitle": "{}\n{} учебный год, на {}".format(school_name(db), y.get("name", ""), _ru_date(today)),
+        "headers": ["Класс", "Предмет", "Учитель", "Тем в КТП", "Часов по КТП", "По плану на дату, ч", "Проведено уроков",
+                    "Отставание, ч", "Уроков без темы КТП"],
+        "widths": [8, 24, 18, 9, 9, 11, 10, 10, 11],
+        "rows": rows,
+        "footer": ["«По плану на дату» считается по датам в КТП; если даты не указаны, столбец пуст. Предметов без КТП: %d." % no_ktp],
+    }
