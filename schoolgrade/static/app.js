@@ -727,6 +727,7 @@
       J.locked ? h("span", { class: "pill bad" }, "период закрыт") : null,
       h("span", { class: "sp" }),
       edit ? h("button", { class: "pri", onclick: function () { lessonDialog(a.id, null, reload); } }, "+ Урок") : null,
+      edit && a.eval_type === "points" ? h("button", { title: "Записать отметки из файла программы SchoolTest", onclick: safe(function () { return schoolTestMarks(a, reload); }) }, "Отметки SchoolTest") : null,
       h("button", { onclick: function () { location.hash = "#/finals?aid=" + a.id; } }, "Отметки за периоды"));
     area.appendChild(info);
     if (!J.students.length) { area.appendChild(h("div", { class: "card muted" }, "В классе (группе) нет учащихся.")); return; }
@@ -1502,6 +1503,54 @@
 
   // ===================================================================== администрирование
   // ---------------------------------------------------------------- импорт из «Старт ШКОЛА»
+  /* ---------------- связь с программой тестирования SchoolTest ---------------- */
+  async function schoolTestLink() {
+    var st = await GET("/api/schooltest/settings");
+    var on = h("input", { type: "checkbox", checked: st.enabled });
+    var key = h("input", { type: "text", readonly: true, value: st.key || "", style: { width: "260px", fontFamily: "Consolas,monospace" } });
+    var addr = location.protocol + "//" + (/^(127\.|localhost)/.test(location.hostname) ? "IP-адрес-этого-компьютера:" + (location.port || 80) : location.host);
+    $main.appendChild(h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Связь по сети"),
+      h("p", null, "SchoolTest — программа тестирования учащихся в локальной сети. При включённой связи SchoolTest получает списки классов и учащихся и записывает отметки за тесты в журнал (урок с видом работы «тест» на дату теста)."),
+      h("label", { style: { display: "block", margin: "8px 0" } }, on, " Разрешить SchoolTest подключаться к SchoolGrade"),
+      h("div", { class: "bar" }, field("Ключ доступа", key),
+        h("button", { onclick: safe(async function () { key.select(); try { document.execCommand("copy"); toast("Ключ скопирован"); } catch (e) {} }) }, "Копировать"),
+        h("button", { onclick: safe(async function () {
+          if (st.key && !confirmBox("Создать новый ключ? SchoolTest со старым ключом перестанет подключаться.")) return;
+          st = await PUT("/api/schooltest/settings", { new_key: true }); key.value = st.key; toast("Новый ключ создан");
+        }) }, "Новый ключ")),
+      h("div", { class: "hint" }, "В SchoolTest: «Настройки» → «Связь с SchoolGrade» — адрес ", h("b", null, addr), " и этот ключ."),
+      h("div", { class: "bar", style: { marginTop: "8px" } }, h("button", { class: "pri", onclick: safe(async function () {
+        st = await PUT("/api/schooltest/settings", { enabled: on.checked }); key.value = st.key; toast("Сохранено");
+      }) }, "Сохранить"))));
+    $main.appendChild(h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Без сети — файлами"),
+      h("p", null, "Списки классов: скачайте файл и загрузите его в SchoolTest («Классы» → «Файл SchoolGrade»). Отметки за тест: в SchoolTest скачайте файл отметок, затем в журнале нужного предмета нажмите «Отметки SchoolTest»."),
+      h("button", { onclick: function () { download("/api/schooltest/classes_file"); } }, "Скачать списки классов для SchoolTest")));
+  }
+  async function schoolTestMarks(a, reload) {
+    var fs = await pickFile(".json"); if (!fs.length) return;
+    var data = await fileToB64(fs[0]);
+    var P = await POST("/api/schooltest/marks_preview", { data: data });
+    if (!P.class_found) { toast("Класс «" + P.class_name + "» из файла не найден в текущем учебном году", true); return; }
+    if (P.class_id !== a.class_id && !confirmBox("Файл относится к классу " + P.class_name + ", а открыт журнал " + a.class_name + ". Продолжить с классом из файла?")) return;
+    var opts = P.assignments.map(function (x) { return [x.id, x.subject + (x.group ? " (" + x.group + ")" : "") + (x.teacher ? " — " + x.teacher : "")]; });
+    if (!opts.length) { toast("Нет предметов этого класса, в которые вы можете записать отметки", true); return; }
+    var cur = P.assignments.filter(function (x) { return x.id === a.id; })[0] || P.assignments.filter(function (x) { return x.suggest; })[0] || P.assignments[0];
+    var asg = sel(opts, cur.id);
+    var date = h("input", { type: "date", value: P.date });
+    var title = h("input", { type: "text", value: P.title, style: { width: "100%" } });
+    var over = h("input", { type: "checkbox" });
+    var body = h("div", null,
+      h("div", { class: "form" }, field("Предмет", asg, "wide"), field("Дата", date), field("Название работы", title, "wide")),
+      h("label", { style: { display: "block", margin: "6px 0" } }, over, " Заменить отметки, если они уже стоят за эту работу"),
+      h("table", { class: "t", style: { marginTop: "8px" } }, h("thead", null, h("tr", null, h("th", null, "Учащийся"), h("th", null, "Отметка"))),
+        h("tbody", null, P.marks.map(function (m) { return h("tr", null, h("td", null, m.name), h("td", { class: "num" }, String(m.mark))); }))));
+    modal("Отметки SchoolTest: " + P.class_name, body, [{ text: "Записать в журнал", cls: "pri", fn: async function () {
+      var r = await POST("/api/schooltest/marks_import", { data: data, assignment_id: +asg.value, date: date.value, title: title.value, overwrite: over.checked });
+      toast("Записано отметок: " + r.saved + (r.problems.length ? ". Не записаны: " + r.problems.map(function (p) { return p.name + " (" + p.reason + ")"; }).join("; ") : ""), !!r.problems.length);
+      if (reload) reload();
+    } }]);
+  }
+
   async function startSchoolImport() {
     var st = await GET("/api/import/startschool");
     var box = h("div");
@@ -1606,7 +1655,7 @@
   ROUTES.admin = async function (params) {
     head("Администрирование");
     var tab = params.tab || "users";
-    var tabs = [["users", "Пользователи"], ["rules", "Настройки и правила"], ["fields", "Тип и поля"], ["transfer", "Перенос данных"], ["startschool", "Импорт из «Старт ШКОЛА»"], ["backup", "Резервные копии"], ["audit", "Журнал действий"]];
+    var tabs = [["users", "Пользователи"], ["rules", "Настройки и правила"], ["fields", "Тип и поля"], ["transfer", "Перенос данных"], ["startschool", "Импорт из «Старт ШКОЛА»"], ["schooltest", "Связь с SchoolTest"], ["backup", "Резервные копии"], ["audit", "Журнал действий"]];
     if (deptMode()) tabs = tabs.filter(function (t) { return t[0] !== "startschool"; });
     $main.appendChild(h("div", { class: "tabs" }, tabs.map(function (t) {
       return h("a", { href: "javascript:void 0", class: tab === t[0] ? "on" : "", onclick: function () { params.tab = t[0]; setParams(params); route(); } }, t[1]);
@@ -1680,6 +1729,8 @@
       $main.appendChild(hideCard("staff", "Поля сотрудников"));
     } else if (tab === "startschool") {
       await startSchoolImport();
+    } else if (tab === "schooltest") {
+      await schoolTestLink();
     } else if (tab === "transfer") {
       $main.appendChild(h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Перенос всех настроек и оценок на другой сервер"),
         h("p", null, "Экспорт — один файл .sgdb со всеми данными (пароли — необратимый хэш, персональные данные зашифрованы). Импорт заменяет текущую базу (перед этим создаётся резервная копия)."),

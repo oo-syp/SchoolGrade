@@ -2022,3 +2022,7 @@ def rep_ktp_progress(req):
     y = year_arg(req)
     asg = _scoped_assignments(req, y, req.arg("class_id", cast=int))
     return table_response(req, R.ktp_progress(db(), y, asg))
+
+
+# ================================================================ связь с SchoolTest
+from . import stlink  # noqa: E402,F401
