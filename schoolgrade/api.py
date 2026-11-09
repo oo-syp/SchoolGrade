@@ -5,6 +5,7 @@ import csv
 import io
 import json
 import os
+import re
 import time
 
 from . import APP_NAME, APP_VERSION, APP_ORG, APP_AUTHOR, APP_CITY_YEAR
@@ -1104,10 +1105,14 @@ def api_lesson_create(req, aid):
     else:   # вызов без выбора темы: взять следующую тему из КТП
         nxt = _ktp_next(aid) if not topic else None
         kid = nxt["id"] if nxt else None
-    if kid and not topic:
-        topic = db().val("SELECT topic FROM ktp WHERE id=?", (kid,)) or ""
+    homework = d.get("homework")
+    if kid:
+        k = db().one("SELECT topic, homework FROM ktp WHERE id=?", (kid,))
+        topic = topic or k["topic"] or ""
+        if homework is None:          # не задано в запросе — из КТП
+            homework = k["homework"] or ""
     lid = insert("lessons", {"assignment_id": aid, "date": date, "num": num, "topic": topic,
-                             "homework": d.get("homework", ""), "work_type": d.get("work_type", ""), "ktp_id": kid})
+                             "homework": homework or "", "work_type": d.get("work_type", ""), "ktp_id": kid})
     return {"id": lid}
 
 
@@ -1883,7 +1888,7 @@ def api_report_cards(req, cid):
 # ------------------------------------------------------------------ календарно-тематическое планирование
 from . import ktp as KTP   # noqa: E402
 
-KTP_FIELDS = ["num", "topic", "hours", "planned_date", "section", "note"]
+KTP_FIELDS = ["num", "topic", "hours", "planned_date", "section", "note", "homework"]
 
 
 def _ktp_item_id(aid, kid):
@@ -1955,6 +1960,7 @@ def api_ktp_put(req, aid):
                 row["hours"] = 1.0
             row["num"] = i + 1
             row["planned_date"] = (row.get("planned_date") or "")[:10]
+            row["homework"] = (row.get("homework") or "").strip()[:500]
             iid = it.get("id")
             if iid and int(iid) in existing:
                 update("ktp", int(iid), row)
@@ -2008,12 +2014,129 @@ def api_ktp_xlsx(req, aid):
     items = _ktp_items(aid)
     rep = {"name": "КТП", "title": "Календарно-тематическое планирование: {}, {} класс".format(a["subject"], a.get("class_name", "")),
            "subtitle": R.school_name(db()),
-           "headers": ["№", "Раздел", "Тема урока", "Часов", "Дата по плану", "Проведено", "Примечание"],
-           "widths": [5, 26, 60, 7, 12, 16, 20],
+           "headers": ["№", "Раздел", "Тема урока", "Часов", "Дата по плану", "Домашнее задание", "Проведено", "Примечание"],
+           "widths": [5, 26, 60, 7, 12, 30, 16, 20],
            "rows": [[i["num"], i["section"], i["topic"], R.fmt(float(i["hours"]), 1).replace(",0", ""),
-                     R._ru_date(i["planned_date"]), ", ".join(R._ru_date(x) for x in i["done"]), i["note"]] for i in items]}
+                     R._ru_date(i["planned_date"]), i.get("homework") or "", ", ".join(R._ru_date(x) for x in i["done"]), i["note"]]
+                    for i in items]}
     data = xlsx.build([rep])
     return FileResponse(data, "KTP_{}_{}.xlsx".format(a["subject"], a.get("class_name", "")).replace(" ", "_"), XLSX_CT)
+
+
+# ------------------------------------------------------------------ расписание по КТП: даты и уроки в журнале
+STUDY_KINDS = ("q1", "q2", "q3", "q4", "h1", "h2")
+
+
+def _study_ranges(year_id):
+    return [(p["start_date"], p["end_date"]) for p in db().q(
+        "SELECT start_date, end_date FROM periods WHERE year_id=? AND kind IN ('q1','q2','q3','q4','h1','h2') "
+        "AND start_date IS NOT NULL AND start_date<>'' AND end_date IS NOT NULL AND end_date<>''", (year_id,))]
+
+
+def _parse_day_list(text, start_year):
+    """«01.01, 07.01, 08.03» → множество дат ISO (выходные и праздники)."""
+    out = set()
+    for part in re.split(r"[,;\s]+", text or ""):
+        iso = KTP._date_iso(part, start_year)
+        if iso:
+            out.add(iso)
+    return out
+
+
+def ktp_schedule(a, d):
+    """Слоты уроков по дням недели и пункты КТП по часам → [{date, num, ktp_id, topic, homework}]."""
+    import datetime as DT
+    y = R.year_of_class(db(), a["class_id"])
+    need(y, "Не найден учебный год класса", 400)
+    start_year = int(str(y.get("name") or "2026")[:4])
+    days = dict((int(k), max(0, min(8, int(v or 0)))) for k, v in (d.get("days") or {}).items() if str(k).isdigit())
+    need(any(days.values()), "Укажите, в какие дни недели проходят уроки", 400)
+    ranges = _study_ranges(y["id"]) if d.get("skip_holidays", True) else []
+    try:
+        start = DT.date.fromisoformat(d.get("start") or DT.date.today().isoformat())
+        end = DT.date.fromisoformat(d["end"]) if d.get("end") else (
+            DT.date.fromisoformat(max(r[1] for r in ranges)) if ranges else DT.date(start_year + 1, 5, 31))
+    except ValueError:
+        raise ApiError(400, "Неверная дата")
+    need(start <= end, "Дата начала позже даты окончания", 400)
+    need((end - start).days <= 400, "Слишком длинный период", 400)
+    off = _parse_day_list(d.get("holidays"), start_year)
+    mode = d.get("mode") or "lessons"
+    items = _ktp_items(a["id"])
+    need(items, "КТП пустое", 400)
+    # единицы: каждый час темы — отдельный урок
+    units = []
+    first = 0
+    if mode == "lessons" and d.get("from") != "first":
+        for i, it in enumerate(items):
+            if len(it["done"]) < max(1, int(round(float(it["hours"] or 1)))):
+                first = i
+                break
+        else:
+            first = len(items)
+    for i, it in enumerate(items[first:], first):
+        n = max(1, int(round(float(it["hours"] or 1))))
+        left = n - len(it["done"]) if (mode == "lessons" and d.get("from") != "first") else n
+        for k in range(max(0, left)):
+            units.append(it)
+    existing = {}
+    if mode == "lessons":
+        for r in db().q("SELECT date, COUNT(*) n FROM lessons WHERE assignment_id=? GROUP BY date", (a["id"],)):
+            existing[r["date"]] = r["n"]
+    out, skipped_locked = [], 0
+    day = start
+    ui = 0
+    while day <= end and ui < len(units):
+        iso = day.isoformat()
+        n = days.get(day.isoweekday(), 0)
+        ok = n and iso not in off and (not ranges or any(r[0] <= iso <= r[1] for r in ranges))
+        if ok and mode == "lessons" and locked_date(a["class_id"], iso):
+            skipped_locked += 1
+            ok = False
+        if ok:
+            have = existing.get(iso, 0)
+            for slot in range(have, n):
+                if ui >= len(units):
+                    break
+                it = units[ui]
+                ui += 1
+                out.append({"date": iso, "num": slot + 1, "ktp_id": it["id"], "topic": it["topic"],
+                            "homework": it.get("homework") or "", "item_num": it["num"]})
+        day += DT.timedelta(days=1)
+    return {"slots": out, "left": len(units) - ui, "units": len(units), "skipped_locked": skipped_locked,
+            "end": end.isoformat()}
+
+
+@router.route("POST", "/api/assignments/:aid/ktp/schedule")
+def api_ktp_schedule(req, aid):
+    """Расставить плановые даты в КТП или создать уроки в журнале по расписанию (dry_run — только предпросмотр)."""
+    need_school(req)
+    a = _need_ktp_view(req, aid)
+    d = req.json()
+    mode = d.get("mode") or "lessons"
+    if mode == "lessons":
+        need_journal_for(a)
+        need(auth.can_edit_assignment(db(), req.user, a["id"]))
+    else:
+        need(_can_edit_ktp(req, a))
+    res = ktp_schedule(a, d)
+    if d.get("dry_run"):
+        return res
+    with db().tx():
+        if mode == "dates":
+            seen = set()
+            for sl in res["slots"]:
+                if sl["ktp_id"] not in seen:
+                    seen.add(sl["ktp_id"])
+                    db().ex("UPDATE ktp SET planned_date=? WHERE id=?", (sl["date"], sl["ktp_id"]))
+        else:
+            for sl in res["slots"]:
+                insert("lessons", {"assignment_id": a["id"], "date": sl["date"], "num": sl["num"], "topic": sl["topic"],
+                                   "homework": sl["homework"] if d.get("with_homework", True) else "",
+                                   "work_type": "", "ktp_id": sl["ktp_id"]})
+    db().audit(req.user, req.ip, "ktp_schedule_" + mode, {"assignment": a["id"], "count": len(res["slots"])})
+    res["created"] = len(res["slots"])
+    return res
 
 
 @router.route("GET", "/api/reports/ktp_progress")

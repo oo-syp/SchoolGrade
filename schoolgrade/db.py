@@ -10,7 +10,7 @@ import sqlite3
 import threading
 import time
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
@@ -128,7 +128,7 @@ CREATE TABLE IF NOT EXISTS ktp (
     id INTEGER PRIMARY KEY,
     assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
     num INTEGER NOT NULL DEFAULT 0, topic TEXT NOT NULL DEFAULT '', hours REAL NOT NULL DEFAULT 1,
-    planned_date TEXT DEFAULT '', section TEXT DEFAULT '', note TEXT DEFAULT ''
+    planned_date TEXT DEFAULT '', section TEXT DEFAULT '', note TEXT DEFAULT '', homework TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS ix_ktp_a ON ktp(assignment_id, num);
 
@@ -265,6 +265,12 @@ class Database(object):
             if not has_col("lessons", "ktp_id"):
                 self.conn.execute("ALTER TABLE lessons ADD COLUMN ktp_id INTEGER REFERENCES ktp(id) ON DELETE SET NULL")
             self.conn.execute("UPDATE meta SET value='3' WHERE key='schema'")
+
+        # --- версия 3 -> 4: домашнее задание в КТП ---
+        if cur < 4:
+            if not has_col("ktp", "homework"):
+                self.conn.execute("ALTER TABLE ktp ADD COLUMN homework TEXT DEFAULT ''")
+            self.conn.execute("UPDATE meta SET value='4' WHERE key='schema'")
 
     # ------------------------------------------------------------ helpers
     def q(self, sql, args=()):

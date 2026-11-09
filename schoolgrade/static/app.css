@@ -169,5 +169,6 @@ table.ktp input.ktp-topic{min-width:340px}
 table.ktp input.ktp-h{width:56px}
 table.ktp input.ktp-d{width:140px}
 table.ktp input.ktp-s{min-width:150px}
+table.ktp input.ktp-hw{min-width:200px}
 table.ktp tr.grp td{background:#f1f4f9;font-weight:600;color:var(--navy)}
 table.ktp tr.ktp-next td{background:#fff8e1}

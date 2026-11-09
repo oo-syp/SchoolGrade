@@ -815,6 +815,13 @@ def report_cards(db, class_id, kinds=None, student_ids=None):
 
 
 # ------------------------------------------------------------- выполнение программы (КТП)
+def _hrs(x):
+    """Часы для отчёта: 1,5 / 12 (без «,0»)."""
+    if x is None:
+        return ""
+    return fmt(float(x), 1).replace(",0", "")
+
+
 def ktp_progress(db, year_id, assignments, today=None):
     import datetime
     today = today or datetime.date.today().isoformat()
@@ -837,16 +844,16 @@ def ktp_progress(db, year_id, assignments, today=None):
         dated = [i for i in items if i["planned_date"]]
         plan = sum(float(i["hours"] or 0) for i in dated if i["planned_date"] <= today) if dated else None
         lag = (plan - done) if plan is not None else None
-        rows.append([class_name(classes[a["class_id"]]), subj, teacher_of(a), len(items), fmt(hours, 1).replace(",0", ""),
-                     "" if plan is None else fmt(plan, 1).replace(",0", ""), done,
-                     "" if lag is None or lag <= 0 else fmt(lag, 1).replace(",0", ""), unlinked or ""])
+        rows.append([class_name(classes[a["class_id"]]), subj, teacher_of(a), len(items), _hrs(hours),
+                     "" if plan is None else _hrs(plan), done,
+                     "" if lag is None or lag <= 0 else _hrs(lag), unlinked or ""])
         tot["items"] += len(items)
         tot["hours"] += hours
         tot["plan"] += plan or 0
         tot["done"] += done
         tot["lag"] += lag if lag and lag > 0 else 0
-    rows.append(["ИТОГО", "", "", tot["items"], fmt(tot["hours"], 1).replace(",0", ""), fmt(tot["plan"], 1).replace(",0", ""),
-                 tot["done"], fmt(tot["lag"], 1).replace(",0", "") if tot["lag"] else "", ""])
+    rows.append(["ИТОГО", "", "", tot["items"], _hrs(tot["hours"]), _hrs(tot["plan"]),
+                 tot["done"], _hrs(tot["lag"]) if tot["lag"] else "", ""])
     y = db.one("SELECT name FROM years WHERE id=?", (year_id,)) or {}
     return {
         "name": "Выполнение программы",

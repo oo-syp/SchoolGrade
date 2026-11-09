@@ -124,6 +124,7 @@ def read_table(filename, data=None, text=None):
 # ------------------------------------------------------------------ распознавание столбцов
 
 _HDR = {
+    "homework": re.compile(r"(домашн|д\s*/\s*з|^д\.\s*з|задание на дом)", re.I),
     "num": re.compile(r"^(№|n|no|номер|№\s*урока|№\s*п/п|п/п|урок)\b", re.I),
     "topic": re.compile(r"(тема|содержание|наименование|название)", re.I),
     "hours": re.compile(r"(час|кол-во|количество)", re.I),
@@ -249,7 +250,8 @@ def parse_rows(rows, start_year):
                 topic = topic[:m2.start()].strip()
         out.append({"num": int(_NUM.match(num).group(1)) if (num and _NUM.match(num)) else len(out) + 1,
                     "topic": re.sub(r"\s+", " ", topic)[:500], "hours": hours,
-                    "planned_date": _date_iso(get("date"), start_year), "section": section[:200]})
+                    "planned_date": _date_iso(get("date"), start_year), "section": section[:200],
+                    "homework": re.sub(r"\s+", " ", get("homework"))[:500]})
     if not out:
         raise KtpError("Не удалось найти уроки в таблице. Проверьте, что в ней есть столбец с темами уроков")
     # если номера не по порядку — перенумеровать
@@ -257,7 +259,7 @@ def parse_rows(rows, start_year):
     if nums != sorted(nums) or len(set(nums)) != len(nums):
         for i, x in enumerate(out):
             x["num"] = i + 1
-    names = {"num": "№", "topic": "тема", "hours": "часы", "date": "дата"}
+    names = {"num": "№", "topic": "тема", "hours": "часы", "date": "дата", "homework": "домашнее задание"}
     found = ", ".join("%s — столбец %d" % (names[k], v + 1) for k, v in sorted(cols.items(), key=lambda kv: kv[1]))
     notes = ["Распознано: " + found + (", строка заголовка %d" % (header_row + 1) if header_row >= 0 else "")]
     if skipped:
@@ -270,4 +272,4 @@ def parse(filename=None, data=None, text=None, start_year=2026):
 
 
 def to_rows(items):
-    return [[x["num"], x.get("section", ""), x["topic"], x["hours"], x.get("planned_date", "")] for x in items]
+    return [[x["num"], x.get("section", ""), x["topic"], x["hours"], x.get("planned_date", ""), x.get("homework", "")] for x in items]

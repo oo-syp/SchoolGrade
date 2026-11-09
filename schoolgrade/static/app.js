@@ -427,17 +427,19 @@
           h("button", { onclick: safe(fromFile) }, "Загрузить из файла…"),
           h("button", { onclick: pasteDialog }, "Вставить текст…"),
           h("button", { onclick: safe(copyDialog) }, "Скопировать из другого класса…"),
-          h("button", { onclick: function () { items.push({ topic: "", hours: 1, planned_date: "", section: items.length ? items[items.length - 1].section : "", done: [] }); markDirty(); render(); focusLast(); } }, "+ Строка"),
+          h("button", { onclick: function () { items.push({ topic: "", hours: 1, planned_date: "", homework: "", section: items.length ? items[items.length - 1].section : "", done: [] }); markDirty(); render(); focusLast(); } }, "+ Строка"),
           h("span", { class: "sp" }),
+          items.length ? h("button", { title: "Расставить плановые даты по дням недели", onclick: function () { scheduleDialog("dates"); } }, "Расставить даты…") : null,
+          items.length && (!S.me.features || S.me.features.journal !== false) ? h("button", { title: "Создать уроки в электронном журнале по расписанию", onclick: function () { scheduleDialog("lessons"); } }, "Уроки в журнал…") : null,
           items.length ? h("button", { onclick: function () { download("/api/assignments/" + params.aid + "/ktp/xlsx"); } }, "Excel") : null,
           saveBtn) : null,
         h("div", { class: "hint" }, "Поддерживаются таблицы Word (.docx), Excel (.xlsx, .xls), CSV и простой список «1. Тема урока». ",
-          "Столбцы (№, тема, количество часов, дата) определяются автоматически; строки-разделы («Раздел 1. …») запоминаются как названия разделов.")));
+          "Столбцы (№, тема, количество часов, дата, домашнее задание) определяются автоматически; строки-разделы («Раздел 1. …») запоминаются как названия разделов.")));
       if (!items.length) { area.appendChild(h("div", { class: "card muted" }, edit ? "Загрузите КТП из файла, вставьте список тем или скопируйте из другого класса." : "КТП для этого предмета не загружено.")); return; }
       var lastSection = null;
       var rows = [];
       items.forEach(function (it, i) {
-        if (it.section && it.section !== lastSection) rows.push(h("tr", { class: "grp" }, h("td", { colspan: 7 }, it.section)));
+        if (it.section && it.section !== lastSection) rows.push(h("tr", { class: "grp" }, h("td", { colspan: 8 }, it.section)));
         lastSection = it.section;
         var inp = function (key, attrs) {
           var e = h("input", Object.assign({ value: it[key] === undefined || it[key] === null ? "" : String(it[key]), disabled: !edit }, attrs || {}));
@@ -450,6 +452,7 @@
           h("td", null, inp("topic", { class: "ktp-topic", placeholder: "Тема урока" })),
           h("td", null, inp("hours", { class: "ktp-h", inputmode: "decimal" })),
           h("td", null, inp("planned_date", { type: "date", class: "ktp-d" })),
+          h("td", null, inp("homework", { class: "ktp-hw", placeholder: "Домашнее задание" })),
           h("td", { class: "muted", style: { fontSize: "12px" } }, (it.done || []).map(fmtDate).join(", ") + (isNext ? (it.done && it.done.length ? " · " : "") + "следующая" : "")),
           h("td", null, inp("section", { class: "ktp-s", placeholder: "Раздел" })),
           h("td", null, edit ? h("a", { href: "javascript:void 0", title: "Удалить строку", onclick: function () {
@@ -458,13 +461,13 @@
           } }, "✕") : null)));
       });
       area.appendChild(h("div", { class: "card tw" }, h("table", { class: "t ktp" },
-        h("thead", null, h("tr", null, ["№", "Тема урока", "Часов", "Дата по плану", "Проведено (журнал)", "Раздел", ""].map(function (x) { return h("th", null, x); }))),
+        h("thead", null, h("tr", null, ["№", "Тема урока", "Часов", "Дата по плану", "Домашнее задание", "Проведено (журнал)", "Раздел", ""].map(function (x) { return h("th", null, x); }))),
         h("tbody", null, rows))));
     }
     function focusLast() { var l = area.querySelectorAll("input.ktp-topic"); if (l.length) l[l.length - 1].focus(); }
 
     async function save() {
-      K = await PUT("/api/assignments/" + params.aid + "/ktp", { items: items.map(function (x) { return { id: x.id, topic: x.topic, hours: x.hours, planned_date: x.planned_date, section: x.section, note: x.note || "" }; }) });
+      K = await PUT("/api/assignments/" + params.aid + "/ktp", { items: items.map(function (x) { return { id: x.id, topic: x.topic, hours: x.hours, planned_date: x.planned_date, homework: x.homework || "", section: x.section, note: x.note || "" }; }) });
       items = K.items.map(function (x) { return Object.assign({}, x); }); dirty = false; render(); toast("КТП сохранено");
     }
 
@@ -474,9 +477,9 @@
       var body = h("div", null,
         h("div", { class: "hint" }, notes.join(". ") + "."),
         h("div", { style: { maxHeight: "50vh", overflow: "auto", marginTop: "8px" } }, h("table", { class: "t" },
-          h("thead", null, h("tr", null, ["№", "Раздел", "Тема", "Ч.", "Дата"].map(function (x) { return h("th", null, x); }))),
+          h("thead", null, h("tr", null, ["№", "Раздел", "Тема", "Ч.", "Дата", "Д/з"].map(function (x) { return h("th", null, x); }))),
           h("tbody", null, parsed.slice(0, 400).map(function (x) {
-            return h("tr", null, h("td", { class: "n" }, x.num), h("td", { class: "muted" }, x.section || ""), h("td", null, x.topic), h("td", { class: "n" }, String(x.hours).replace(".", ",")), h("td", null, fmtDate(x.planned_date)));
+            return h("tr", null, h("td", { class: "n" }, x.num), h("td", { class: "muted" }, x.section || ""), h("td", null, x.topic), h("td", { class: "n" }, String(x.hours).replace(".", ",")), h("td", null, fmtDate(x.planned_date)), h("td", { class: "muted" }, x.homework || ""));
           })))),
         h("p", null, "Найдено уроков: " + parsed.length + "."));
       var btns = [{ text: items.length ? "Заменить текущее КТП" : "Загрузить", cls: "pri", fn: function () {
@@ -508,11 +511,75 @@
       var src = await GET("/api/assignments/" + params.aid + "/ktp/sources");
       if (!src.length) { toast("Нет КТП по этому предмету в других классах", true); return; }
       var s = sel(src.map(function (x) { return [x.id, x.title]; }), src[0].id, { style: { width: "100%" } });
-      modal("Скопировать КТП", h("div", null, h("p", null, "Источник:"), s, h("div", { class: "hint" }, "Будут скопированы темы, часы, разделы и плановые даты. Даты можно затем поправить.")),
+      modal("Скопировать КТП", h("div", null, h("p", null, "Источник:"), s, h("div", { class: "hint" }, "Будут скопированы темы, часы, разделы, домашние задания и плановые даты. Даты можно затем поправить или расставить заново («Расставить даты…»).")),
         [{ text: "Скопировать", cls: "pri", fn: async function () {
           var r = await GET("/api/assignments/" + s.value + "/ktp");
-          setTimeout(function () { applyParsed(r.items.map(function (x) { return { num: x.num, topic: x.topic, hours: x.hours, planned_date: x.planned_date, section: x.section }; }), ["Источник: " + s.options[s.selectedIndex].text]); }, 0);
+          setTimeout(function () { applyParsed(r.items.map(function (x) { return { num: x.num, topic: x.topic, hours: x.hours, planned_date: x.planned_date, homework: x.homework || "", section: x.section }; }), ["Источник: " + s.options[s.selectedIndex].text]); }, 0);
         } }]);
+    }
+
+    /* расписание: плановые даты в КТП или уроки в журнале по дням недели */
+    function scheduleDialog(mode) {
+      if (dirty) { toast("Сначала сохраните КТП", true); return; }
+      var lessons = mode === "lessons";
+      var key = "sg_ktp_days_" + params.aid;
+      var saved = {};
+      try { saved = JSON.parse(lsGet(key, "{}")) || {}; } catch (e) { saved = {}; }
+      var names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
+      var dayInp = {};
+      var daysRow = h("div", { class: "bar" }, names.map(function (n, i) {
+        var e = h("input", { type: "number", min: 0, max: 8, value: String((saved.days || {})[i + 1] || 0), style: { width: "56px" } });
+        dayInp[i + 1] = e;
+        return h("label", { style: { display: "flex", flexDirection: "column", alignItems: "center", gap: "2px" } }, h("b", null, n), e);
+      }));
+      var today = new Date().toISOString().slice(0, 10);
+      var first = items.filter(function (x) { return x.planned_date; })[0];
+      var start = h("input", { type: "date", value: lessons ? (saved.start && saved.start > today ? saved.start : today) : (saved.start || (first ? first.planned_date : "") || today) });
+      var end = h("input", { type: "date", value: saved.end || "" });
+      var hol = h("input", { type: "text", value: saved.holidays || "01.01, 02.01, 07.01, 08.03, 01.05, 09.05, 03.07, 07.11, 25.12", style: { width: "100%" } });
+      var skip = h("input", { type: "checkbox", checked: saved.skip_holidays !== false });
+      var fromSel = lessons ? sel([["next", "со следующей непроведённой темы"], ["first", "с первой темы КТП"]], "next") : null;
+      var withHw = h("input", { type: "checkbox", checked: true });
+      var prev = h("div", { style: { maxHeight: "40vh", overflow: "auto", marginTop: "10px" } });
+      function vals() {
+        var days = {};
+        Object.keys(dayInp).forEach(function (k) { days[k] = Number(dayInp[k].value) || 0; });
+        var v = { mode: mode, days: days, start: start.value, end: end.value, holidays: hol.value, skip_holidays: skip.checked,
+                  from: fromSel ? fromSel.value : "first", with_homework: withHw.checked };
+        lsSet(key, JSON.stringify({ days: days, start: start.value, end: end.value, holidays: hol.value, skip_holidays: skip.checked }));
+        return v;
+      }
+      var preview = safe(async function () {
+        var r = await POST("/api/assignments/" + params.aid + "/ktp/schedule", Object.assign(vals(), { dry_run: true }));
+        clear(prev);
+        prev.appendChild(h("p", null, (lessons ? "Будет создано уроков: " : "Получат даты уроков: ") + r.slots.length +
+          (r.left ? ". Не хватило дат для " + r.left + " ч КТП — увеличьте период или число уроков в неделю." : ".") +
+          (r.skipped_locked ? " Пропущено дней в закрытом периоде: " + r.skipped_locked + "." : "")));
+        prev.appendChild(h("table", { class: "t" }, h("thead", null, h("tr", null, ["Дата", "Урок", "Тема", lessons ? "Д/з" : ""].map(function (x) { return h("th", null, x); }))),
+          h("tbody", null, r.slots.slice(0, 300).map(function (sl) {
+            return h("tr", null, h("td", null, fmtDate(sl.date) + " " + ["", "пн", "вт", "ср", "чт", "пт", "сб", "вс"][new Date(sl.date + "T12:00").getDay() || 7]),
+              h("td", { class: "n" }, sl.num), h("td", null, sl.item_num + ". " + sl.topic), h("td", { class: "muted" }, lessons ? sl.homework : ""));
+          }))));
+        return r;
+      });
+      var body = h("div", null,
+        h("p", { class: "hint" }, lessons ? "В журнале будут созданы уроки с темами и домашними заданиями из КТП. Дни, в которые урок уже есть в журнале, учитываются — дубли не создаются." :
+          "Каждой теме КТП будет поставлена плановая дата по расписанию. Темы на несколько часов займут несколько уроков подряд."),
+        h("b", null, "Сколько уроков в каждый день недели"), daysRow,
+        h("div", { class: "form" }, field("С даты", start), field("По дату (пусто — до конца учебного года)", end), fromSel ? field("Начать", fromSel) : null),
+        h("label", { style: { display: "block", margin: "8px 0" } }, skip, " Пропускать каникулы (дни вне четвертей / полугодий из настроек года)"),
+        field("Праздничные и нерабочие дни (через запятую)", hol, "wide"),
+        lessons ? h("label", { style: { display: "block", margin: "8px 0" } }, withHw, " Переносить домашнее задание из КТП") : null,
+        h("div", { class: "bar" }, h("button", { onclick: preview }, "Показать предпросмотр")), prev);
+      modal(lessons ? "Создать уроки в журнале по КТП" : "Расставить даты в КТП", body, [{ text: lessons ? "Создать уроки" : "Расставить даты", cls: "pri", fn: async function () {
+        var v = vals();
+        var r = await POST("/api/assignments/" + params.aid + "/ktp/schedule", Object.assign(v, { dry_run: true }));
+        if (!r.slots.length) { toast("Нет подходящих дат", true); return false; }
+        if (lessons && !confirmBox("Создать в журнале " + r.slots.length + " уроков с " + fmtDate(r.slots[0].date) + " по " + fmtDate(r.slots[r.slots.length - 1].date) + "?")) return false;
+        var res = await POST("/api/assignments/" + params.aid + "/ktp/schedule", v);
+        toast(lessons ? "Создано уроков: " + res.created : "Даты расставлены: " + res.created + " уроков");
+        load();
+      } }]);
     }
     load();
   };
@@ -816,6 +883,7 @@
       var syncTopic = function () {
         var it = K.items.filter(function (x) { return String(x.id) === ksel.value; })[0];
         if (it && topicInp) topicInp.value = it.topic;
+        if (it && it.homework && f.inputs.homework && !f.inputs.homework.value) f.inputs.homework.value = it.homework;
       };
       ksel.onchange = syncTopic;
       if (!l && curId) syncTopic();
