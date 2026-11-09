@@ -84,7 +84,7 @@
   function fmtDate(d) { if (!d) return ""; var p = d.split("-"); return p.length === 3 ? p[2] + "." + p[1] + "." + p[0] : d; }
   function lvClass(v) {
     var n = parseInt(v, 10);
-    if (v === "н" || v === "н/а" || v === "незач.") return "v-n";
+    if (/^н[буn]?$/.test(v) || v === "н/а" || v === "незач.") return "v-n";
     if (!(n >= 1)) return "";
     return n <= 2 ? "v-low" : n <= 4 ? "v-sat" : n <= 6 ? "v-mid" : n <= 8 ? "v-suf" : "v-high";
   }
@@ -232,9 +232,16 @@
   }
 
   // ===================================================================== оболочка
+  // [адрес, название, доступ, функция (отключаемая администратором)]
   var NAV_SCHOOL = [
-    ["Работа", [["#/", "Главная"], ["#/sheet", "Ведомость класса"], ["#/journal", "Электронный журнал", "journal"], ["#/finals", "Отметки по предмету"], ["#/behavior", "Поведение и итоги года"], ["#/cards", "Табели для родителей"], ["#/ktp", "Тематическое планирование"]]],
-    ["Анализ", [["#/control", "Контроль накопляемости"], ["#/reports", "Отчёты и аналитика"], ["#/department", "Передать в отдел образования", "all"]]],
+    ["Работа", [["#/", "Главная"], ["#/sheet", "Ведомость класса", null, "sheet"], ["#/journal", "Электронный журнал", "journal", "journal"],
+      ["#/clubs", "Журнал ФЗ и ОпИ", "journal", "clubs"], ["#/finals", "Отметки по предмету", null, "finals"],
+      ["#/behavior", "Поведение и итоги года", null, "behavior"], ["#/cards", "Табели для родителей", null, "cards"],
+      ["#/ktp", "Тематическое планирование", null, "ktp"], ["#/schedule", "Расписание", null, "schedule"], ["#/subs", "Замены", null, "subs"],
+      ["#/classroom", "Мой класс", "classroom", "classroom"]]],
+    ["Анализ", [["#/control", "Контроль накопляемости", null, "control"], ["#/risk", "Прогноз и группа риска", null, "risk"],
+      ["#/monitor", "Мониторинг журнала", "manage", "monitor"], ["#/analysis", "Сравнительный анализ", null, "analysis"],
+      ["#/reports", "Отчёты и аналитика", null, "reports"], ["#/department", "Передать в отдел образования", "all", "department"]]],
     ["Данные", [["#/classes", "Классы и нагрузка"], ["#/students", "Учащиеся"], ["#/staff", "Сотрудники", "manage"], ["#/subjects", "Предметы", "manage"]]],
     ["Учреждение", [["#/school", "Паспорт учреждения"], ["#/years", "Учебный год", "manage"], ["#/admin", "Администрирование", "admin"], ["#/about", "О программе"]]],
   ];
@@ -251,7 +258,9 @@
         if (it[2] === "admin") return u.can_admin;
         if (it[2] === "manage") return u.can_manage;
         if (it[2] === "all") return u.can_manage || u.role === "viewer";
+        if (it[3] && !featOn(it[3])) return false;
         if (it[2] === "journal") return journalOn();
+        if (it[2] === "classroom") return u.can_manage || (u.own_classes || []).length > 0;
         return true;
       });
       if (!items.length) return;
@@ -290,6 +299,13 @@
     S.rid++;
     var fn = ROUTES[name] || ROUTES[""];
     if (name === "password") return pagePassword();
+    var navIt = null;
+    (deptMode() ? NAV_DEPT : NAV_SCHOOL).forEach(function (g) { g[1].forEach(function (it) { if (it[0] === "#/" + name) navIt = it; }); });
+    if (navIt && navIt[3] && !featOn(navIt[3])) {
+      head(navIt[1]);
+      $main.appendChild(h("div", { class: "card" }, "Эта функция отключена администратором учреждения. Включить её можно в разделе «Администрирование → Функции программы»."));
+      return;
+    }
     if (!deptMode() && !S.year && ["", "about", "years", "school", "admin", "subjects", "staff"].indexOf(name) < 0) {
       $main.appendChild(h("div", { class: "card" }, h("h2", null, "Учебный год не создан"),
         S.me.user.can_manage ? h("a", { href: "#/years" }, "Создайте учебный год") : "Обратитесь к администратору."));
@@ -324,6 +340,7 @@
   }
   function pagePassword() { renderChangePassword(false); }
   function journalOn() { return !S.me.features || S.me.features.journal !== false; }
+  function featOn(k) { return !S.me.features || S.me.features[k] !== false; }
 
   // ===================================================================== главная
   ROUTES[""] = async function () {
@@ -348,24 +365,42 @@
       [kindsOf().filter(function (k) { return k[0] === curKind(); })[0][1], "текущий учебный период"]].forEach(function (t) {
         tiles.appendChild(h("div", { class: "tile" }, h("b", null, t[0]), h("span", null, t[1])));
       });
+    var tdSlot = h("div");
+    $main.appendChild(tdSlot);
+    todayCard().then(function (c) { if (c) tdSlot.appendChild(c); });
     var g = h("div", { class: "grid2" });
     $main.appendChild(g);
+    var isClub = function (a) { return a.category && a.category !== "subject"; };
+    var jHref = function (a) { return journalOn() ? (isClub(a) && featOn("clubs") ? "#/clubs?aid=" + a.id : "#/journal?cid=" + a.class_id + "&aid=" + a.id) : "#/finals?aid=" + a.id; };
     var c1 = h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, journalOn() ? "Мои журналы" : "Мои предметы"));
     if (!mine.length) c1.appendChild(h("div", { class: "muted" }, u.staff_id ? "Нагрузка не назначена." : "Учётная запись не связана с сотрудником — обратитесь к администратору."));
-    mine.forEach(function (a) {
-      c1.appendChild(h("div", { style: { padding: "4px 0" } }, h("a", { href: journalOn() ? "#/journal?aid=" + a.id : "#/finals?aid=" + a.id }, a.class_name + " — " + a.subject + (a.group_name ? " (" + a.group_name + ")" : "")),
-        " ", h("a", { class: "muted", href: "#/finals?aid=" + a.id, style: { fontSize: "12px" } }, "отметки за периоды"),
-        " ", h("a", { class: "muted", href: "#/sheet?cid=" + a.class_id, style: { fontSize: "12px" } }, "ведомость класса")));
-    });
+    else c1.appendChild(h("div", { class: "subjgrid homegrid" }, mine.map(function (a) {
+      return h("div", { class: "subjcard homecard" },
+        h("a", { class: "hc-main", href: jHref(a) }, h("b", null, a.class_name + " · " + a.subject + (a.group_name ? " (" + a.group_name + ")" : "")),
+          h("small", null, isClub(a) ? (a.category === "fz" ? "факультативные занятия" : "объединение по интересам") : (a.hours ? a.hours + " ч/нед" : ""))),
+        h("div", { class: "hc-links" },
+          featOn("finals") ? h("a", { href: "#/finals?aid=" + a.id }, "отметки за периоды") : null,
+          featOn("ktp") && !isClub(a) ? h("a", { href: "#/ktp?aid=" + a.id }, "КТП") : null,
+          featOn("sheet") ? h("a", { href: "#/sheet?cid=" + a.class_id }, "ведомость") : null));
+    })));
     g.appendChild(c1);
     var own = classes.filter(function (c) { return u.own_classes.indexOf(c.id) >= 0; });
     var c2 = h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, own.length ? "Мой класс" : "Классы"));
-    (own.length ? own : classes).forEach(function (c) {
-      c2.appendChild(h("div", { style: { padding: "4px 0" } }, h("a", { href: "#/classes?cid=" + c.id }, c.name + " класс"), h("span", { class: "muted" }, " · " + c.n + " уч-ся · " + (c.teacher || "кл. рук. не назначен")),
-        " ", h("a", { href: "#/sheet?cid=" + c.id, style: { fontSize: "12px" } }, "ведомость")));
-    });
+    c2.appendChild(h("div", { class: "subjgrid homegrid" }, (own.length ? own : classes).map(function (c) {
+      return h("div", { class: "subjcard homecard" },
+        h("a", { class: "hc-main", href: journalOn() && featOn("journal") ? "#/journal?cid=" + c.id : "#/classes?cid=" + c.id },
+          h("b", null, c.name + " класс"), h("small", null, c.n + " уч-ся · " + (c.teacher || "кл. рук. не назначен"))),
+        h("div", { class: "hc-links" },
+          h("a", { href: "#/classes?cid=" + c.id }, "состав"),
+          featOn("sheet") ? h("a", { href: "#/sheet?cid=" + c.id }, "ведомость") : null,
+          own.length && featOn("classroom") ? h("a", { href: "#/classroom?cid=" + c.id }, "кабинет кл. рук.") : null));
+    })));
     g.appendChild(c2);
-    try {
+    if (u.can_admin) GET("/api/update_check").then(function (U) {
+      if (U.newer) tiles.parentNode.insertBefore(h("div", { class: "card warnbox" }, "Доступна новая версия SchoolGrade " + U.latest + ". ",
+        h("a", { href: U.url, target: "_blank", rel: "noopener" }, "Скачать с GitHub")), tiles);
+    }).catch(function () {});
+    if (featOn("control")) try {
       var acc = await GET("/api/reports/accumulation", { year_id: yid(), kind: curKind() });
       var tot = Object.keys(acc.counts).reduce(function (a, k) { return a + acc.counts[k]; }, 0);
       if (tot) {
@@ -451,7 +486,11 @@
           h("td", { class: "n" }, i + 1),
           h("td", null, inp("topic", { class: "ktp-topic", placeholder: "Тема урока" })),
           h("td", null, inp("hours", { class: "ktp-h", inputmode: "decimal" })),
-          h("td", null, inp("planned_date", { type: "date", class: "ktp-d" })),
+          h("td", null, (function () {
+            var e = inp("planned_date", { type: "date", class: "ktp-d" });
+            e.onchange = function () { it.planned_date = e.value; if (placeByDate(it)) { render(); toast("Строка перемещена по дате"); } };
+            return e;
+          })()),
           h("td", null, inp("homework", { class: "ktp-hw", placeholder: "Домашнее задание" })),
           h("td", { class: "muted", style: { fontSize: "12px" } }, (it.done || []).map(fmtDate).join(", ") + (isNext ? (it.done && it.done.length ? " · " : "") + "следующая" : "")),
           h("td", null, inp("section", { class: "ktp-s", placeholder: "Раздел" })),
@@ -463,6 +502,28 @@
       area.appendChild(h("div", { class: "card tw" }, h("table", { class: "t ktp" },
         h("thead", null, h("tr", null, ["№", "Тема урока", "Часов", "Дата по плану", "Домашнее задание", "Проведено (журнал)", "Раздел", ""].map(function (x) { return h("th", null, x); }))),
         h("tbody", null, rows))));
+    }
+    /* строка с датой встаёт по хронологии среди строк с датами; строки без даты остаются на местах */
+    function placeByDate(it) {
+      if (!it.planned_date) return false;
+      var from = items.indexOf(it);
+      var rest = items.filter(function (x) { return x !== it; });
+      var to = rest.length;
+      for (var i = 0; i < rest.length; i++) {
+        if (rest[i].planned_date && rest[i].planned_date > it.planned_date) { to = i; break; }
+      }
+      if (to === rest.length) {     // позже всех: сразу после последней строки с более ранней датой
+        var lastDated = -1;
+        rest.forEach(function (x, i) { if (x.planned_date) lastDated = i; });
+        if (lastDated >= 0 && from > lastDated) return false;   // и так стоит после неё
+        to = lastDated + 1;
+      }
+      if (to === from) return false;
+      rest.splice(to, 0, it);
+      items = rest;
+      if (rest[to - 1] && rest[to + 1] && rest[to - 1].section === rest[to + 1].section && it.section !== rest[to - 1].section) it.section = rest[to - 1].section;
+      markDirty();
+      return true;
     }
     function focusLast() { var l = area.querySelectorAll("input.ktp-topic"); if (l.length) l[l.length - 1].focus(); }
 
@@ -540,13 +601,17 @@
       var skip = h("input", { type: "checkbox", checked: saved.skip_holidays !== false });
       var fromSel = lessons ? sel([["next", "со следующей непроведённой темы"], ["first", "с первой темы КТП"]], "next") : null;
       var withHw = h("input", { type: "checkbox", checked: true });
+      var useSched = h("input", { type: "checkbox", checked: saved.use_schedule !== false && featOn("schedule") });
+      var schedRow = featOn("schedule") ? h("label", { style: { display: "block", margin: "6px 0" } }, useSched, " По расписанию уроков (дни и число уроков берутся из раздела «Расписание», с учётом чётных/нечётных недель)") : null;
+      var syncDays = function () { Object.keys(dayInp).forEach(function (k) { dayInp[k].disabled = useSched.checked && !!schedRow; }); };
+      useSched.onchange = syncDays;
       var prev = h("div", { style: { maxHeight: "40vh", overflow: "auto", marginTop: "10px" } });
       function vals() {
         var days = {};
         Object.keys(dayInp).forEach(function (k) { days[k] = Number(dayInp[k].value) || 0; });
         var v = { mode: mode, days: days, start: start.value, end: end.value, holidays: hol.value, skip_holidays: skip.checked,
-                  from: fromSel ? fromSel.value : "first", with_homework: withHw.checked };
-        lsSet(key, JSON.stringify({ days: days, start: start.value, end: end.value, holidays: hol.value, skip_holidays: skip.checked }));
+                  from: fromSel ? fromSel.value : "first", with_homework: withHw.checked, use_schedule: !!schedRow && useSched.checked };
+        lsSet(key, JSON.stringify({ days: days, start: start.value, end: end.value, holidays: hol.value, skip_holidays: skip.checked, use_schedule: useSched.checked }));
         return v;
       }
       var preview = safe(async function () {
@@ -565,12 +630,13 @@
       var body = h("div", null,
         h("p", { class: "hint" }, lessons ? "В журнале будут созданы уроки с темами и домашними заданиями из КТП. Дни, в которые урок уже есть в журнале, учитываются — дубли не создаются." :
           "Каждой теме КТП будет поставлена плановая дата по расписанию. Темы на несколько часов займут несколько уроков подряд."),
-        h("b", null, "Сколько уроков в каждый день недели"), daysRow,
+        schedRow, h("b", null, "Сколько уроков в каждый день недели"), daysRow,
         h("div", { class: "form" }, field("С даты", start), field("По дату (пусто — до конца учебного года)", end), fromSel ? field("Начать", fromSel) : null),
         h("label", { style: { display: "block", margin: "8px 0" } }, skip, " Пропускать каникулы (дни вне четвертей / полугодий из настроек года)"),
         field("Праздничные и нерабочие дни (через запятую)", hol, "wide"),
         lessons ? h("label", { style: { display: "block", margin: "8px 0" } }, withHw, " Переносить домашнее задание из КТП") : null,
         h("div", { class: "bar" }, h("button", { onclick: preview }, "Показать предпросмотр")), prev);
+      syncDays();
       modal(lessons ? "Создать уроки в журнале по КТП" : "Расставить даты в КТП", body, [{ text: lessons ? "Создать уроки" : "Расставить даты", cls: "pri", fn: async function () {
         var v = vals();
         var r = await POST("/api/assignments/" + params.aid + "/ktp/schedule", Object.assign(v, { dry_run: true }));
@@ -766,6 +832,8 @@
       }
       if (!params.cid) { area.appendChild(h("div", { class: "card muted" }, "Выберите класс.")); return; }
       var asg = await GET("/api/assignments", { class_id: params.cid });
+      var clubsN = 0;
+      if (featOn("clubs")) asg = asg.filter(function (a) { var c = a.category && a.category !== "subject"; if (c) clubsN++; return !c || String(a.id) === String(params.aid); });
       // предметы класса плиткой
       var grid = h("div", { class: "subjgrid" }, asg.map(function (a) {
         var tag = a.category && a.category !== "subject" ? (a.category === "fz" ? " · ФЗ" : " · ОпИ") : "";
@@ -774,7 +842,8 @@
           h("b", null, a.subject + (a.group_name ? " (" + a.group_name + ")" : "")),
           h("small", null, (a.teacher || "—") + tag));
       }));
-      area.appendChild(h("div", { class: "card" }, h("h3", { style: { marginTop: 0 } }, "Предметы класса"), asg.length ? grid : h("div", { class: "muted" }, "Классу не назначены предметы.")));
+      area.appendChild(h("div", { class: "card" }, h("h3", { style: { marginTop: 0 } }, "Предметы класса"), asg.length ? grid : h("div", { class: "muted" }, "Классу не назначены предметы."),
+        clubsN ? h("div", { class: "hint" }, "Факультативы и объединения по интересам (" + clubsN + ") ведутся в отдельном ", h("a", { href: "#/clubs" }, "журнале ФЗ и ОпИ"), ".") : null));
       if (params.aid && asg.some(function (a) { return String(a.id) === String(params.aid); })) {
         var jarea = h("div"); area.appendChild(jarea);
         var J = await GET("/api/journal/" + params.aid, { period: ps.value });
@@ -787,27 +856,33 @@
 
   function renderJournal(area, J, reload) {
     var a = J.assignment, edit = J.can_edit && !J.locked;
+    var subD = J.sub_dates || [];
+    var canLesson = function (l) { return !J.locked && (J.can_edit || subD.indexOf(l.date) >= 0); };
+    var subOnly = !J.can_edit && subD.length > 0 && !J.locked;
+    var monthMode = !!J.month;
     var info = h("div", { class: "bar" },
       h("b", null, a.class_name + " класс · " + a.subject + (a.group_name ? " (" + a.group_name + ")" : "")),
       h("span", { class: "muted" }, "учитель: " + (a.teacher || "—") + " · " + a.hours + " ч/нед · " + ({ points: "10-балльная система", pass: "зачётная система", none: "без отметок" }[a.eval_type] || "")),
       J.period ? h("span", { class: "pill" }, J.period.name + ": " + fmtDate(J.period.start_date) + " – " + fmtDate(J.period.end_date)) : null,
       J.locked ? h("span", { class: "pill bad" }, "период закрыт") : null,
+      subOnly ? h("span", { class: "pill warn" }, "замена: " + subD.map(fmtDate).join(", ")) : null,
       h("span", { class: "sp" }),
-      edit ? h("button", { class: "pri", onclick: function () { lessonDialog(a.id, null, reload); } }, "+ Урок") : null,
+      edit || subOnly ? h("button", { class: "pri", onclick: function () { lessonDialog(a.id, null, reload, subOnly ? subD : null); } }, "+ Урок") : null,
+      h("button", { title: "Печать страниц журнала по форме", onclick: function () { printJournal(J); } }, "Печать"),
       edit && a.eval_type === "points" ? h("button", { title: "Записать отметки из файла программы SchoolTest", onclick: safe(function () { return schoolTestMarks(a, reload); }) }, "Отметки SchoolTest") : null,
-      h("button", { onclick: function () { location.hash = "#/finals?aid=" + a.id; } }, "Отметки за периоды"));
+      monthMode || !featOn("finals") ? null : h("button", { onclick: function () { location.hash = "#/finals?aid=" + a.id; } }, "Отметки за периоды"));
     area.appendChild(info);
     if (!J.students.length) { area.appendChild(h("div", { class: "card muted" }, "В классе (группе) нет учащихся.")); return; }
     var lessons = J.lessons;
     var tr = h("tr", null, h("th", { class: "num" }, "№"), h("th", { class: "nm" }, "Учащийся"),
       lessons.map(function (l) {
         var d = l.date.split("-");
-        return h("th", { class: "ld" + (l.work_type ? " kr" : ""), title: (l.topic || "") + (l.work_type ? " [" + l.work_type + "]" : "") + (l.homework ? "\nД/з: " + l.homework : ""),
-          onclick: function () { if (J.can_edit) lessonDialog(a.id, l, reload); } }, d[2] + "." + d[1], h("small", null, l.work_type ? l.work_type.slice(0, 4) : (l.num > 1 ? "#" + l.num : "")));
+        return h("th", { class: "ld" + (l.work_type ? " kr" : "") + (l.sub_teacher ? " subl" : ""), title: (l.topic || "") + (l.work_type ? " [" + l.work_type + "]" : "") + (l.homework ? "\nД/з: " + l.homework : "") + (l.sub_teacher ? "\nЗамена: " + l.sub_teacher : ""),
+          onclick: function () { if (canLesson(l)) lessonDialog(a.id, l, reload, subOnly ? subD : null); } }, d[2] + "." + d[1], h("small", null, l.sub_teacher ? "зам." : l.work_type ? l.work_type.slice(0, 4) : (l.num > 1 ? "#" + l.num : "")));
       }),
-      h("th", { class: "n", title: "Количество отметок в баллах" }, "Кол."), h("th", { class: "n" }, "Ср."), h("th", { class: "n", title: "Пропуски" }, "Пр."),
-      h("th", { class: "n", title: "Предварительная (по среднему арифметическому с математическим округлением)" }, "Расч."),
-      h("th", { class: "n" }, J.period ? J.period.name.replace(" четверть", " чет.") : "Итог"));
+      monthMode ? null : h("th", { class: "n", title: "Количество отметок в баллах" }, "Кол."), monthMode ? null : h("th", { class: "n" }, "Ср."), h("th", { class: "n", title: "Пропуски" }, "Пр."),
+      monthMode ? null : h("th", { class: "n", title: "Прогноз отметки за период: среднее арифметическое текущих отметок с математическим округлением. Красным — риск (1–2 или мало отметок)" }, "Прогн."),
+      monthMode ? null : h("th", { class: "n" }, J.period ? J.period.name.replace(" четверть", " чет.") : "Итог"));
     var rows = [];
     var inputs = [];
     J.students.forEach(function (s, ri) {
@@ -819,23 +894,24 @@
         sumCells.cnt.textContent = pts.length || "";
         var avg = pts.length ? pts.reduce(function (x, y) { return x + y; }, 0) / pts.length : null;
         sumCells.avg.textContent = avg === null ? "" : avg.toFixed(2).replace(".", ",");
-        sumCells.abs.textContent = vals.filter(function (v) { return v === "н"; }).length || "";
+        sumCells.abs.textContent = vals.filter(function (v) { return /^н/.test(v); }).length || "";
         var need = (a.hours <= 1 ? S.me.rules.min_marks_quarter_1h : S.me.rules.min_marks_quarter);
         var sug = avg === null ? "" : (pts.length < need ? "н/а?" : String(Math.floor(avg + 0.5 + 1e-9)));
-        sumCells.sug.textContent = sug; sumCells.sug.className = "sum " + lvClass(sug);
-        sumCells.sug.title = pts.length < need && avg !== null ? "Отметок меньше минимума (" + need + ")" : "";
+        sumCells.sug.textContent = sug; sumCells.sug.className = "sum " + lvClass(sug) + ((sug === "н/а?" || (Number(sug) && Number(sug) <= 2)) ? " risk" : "");
+        sumCells.sug.title = pts.length < need && avg !== null ? "Риск: отметок меньше минимума (" + need + ")" : (Number(sug) && Number(sug) <= 2 ? "Риск: низкий уровень" : "");
       };
       lessons.forEach(function (l, ci) {
         var key = l.id + "_" + s.id;
         var v = J.marks[key] || "";
-        var inp = h("input", { value: v, class: lvClass(v), disabled: !edit, maxlength: 6, "data-r": ri, "data-c": ci });
+        var inp = h("input", { value: v, class: lvClass(v), disabled: !canLesson(l), maxlength: 6, "data-r": ri, "data-c": ci,
+          title: /^н./.test(v) ? "Отсутствовал " + ((J.reasons || {})[v.charAt(1)] || "") : null });
         inp.addEventListener("focus", function () { inp.select(); });
         inp.addEventListener("change", safe(async function () {
           inp.classList.add("saving");
           try {
             var r = await POST("/api/marks", { items: [{ lesson_id: l.id, student_id: s.id, value: inp.value }] });
             var nv = r.saved[0].value; inp.value = nv; J.marks[key] = nv || undefined; if (!nv) delete J.marks[key];
-            inp.className = lvClass(nv); recalc();
+            inp.className = lvClass(nv); inp.title = /^н./.test(nv) ? "Отсутствовал " + ((J.reasons || {})[nv.charAt(1)] || "") : ""; recalc();
           } catch (e) { inp.value = J.marks[key] || ""; inp.className = lvClass(inp.value); throw e; }
         }));
         inp.addEventListener("keydown", function (e) { navKey(e, inputs, ri, ci); });
@@ -851,12 +927,12 @@
       }));
       recalc();
       rows.push(h("tr", null, h("td", { class: "num" }, ri + 1), h("td", { class: "nm", title: s.name + (s.pe_group ? " · физкультура: " + s.pe_group : "") }, s.name), cells,
-        sumCells.cnt, sumCells.avg, sumCells.abs, sumCells.sug, h("td", { class: "fin c" }, finInp)));
+        monthMode ? null : sumCells.cnt, monthMode ? null : sumCells.avg, sumCells.abs, monthMode ? null : sumCells.sug, monthMode ? null : h("td", { class: "fin c" }, finInp)));
     });
     area.appendChild(h("div", { class: "tw", style: { maxHeight: "70vh" } }, h("table", { class: "jr" }, h("thead", null, tr), h("tbody", null, rows))));
-    area.appendChild(h("div", { class: "hint" }, "Ввод: 1–10, н (отсутствовал), зач, незач, осв. Перемещение — стрелки, Enter — вниз. Щелчок по дате — тема урока, д/з, вид работы. ",
+    area.appendChild(h("div", { class: "hint" }, "Ввод: 1–10, н (отсутствовал), зач, незач, осв. Причина пропуска: нб — по болезни, ну — по уважительной, нн — без уважительной (классный руководитель может указать причину за весь день). Перемещение — стрелки, Enter — вниз. Щелчок по дате — тема урока, д/з, вид работы. ",
       "«Расч.» — предварительная отметка за период (среднее арифметическое, математическое округление; минимум отметок — " + S.me.rules.min_marks_quarter + ", при 1 ч/нед — " + S.me.rules.min_marks_quarter_1h + ")."));
-    if (!lessons.length) area.appendChild(h("div", { class: "card muted", style: { marginTop: "10px" } }, "В этом периоде ещё нет уроков. Нажмите «+ Урок»."));
+    if (!lessons.length) area.appendChild(h("div", { class: "card muted", style: { marginTop: "10px" } }, monthMode ? "В этом месяце ещё нет занятий. Нажмите «+ Урок»." : "В этом периоде ещё нет уроков. Нажмите «+ Урок»."));
   }
   function navKey(e, inputs, r, c) {
     var dr = 0, dc = 0;
@@ -866,11 +942,12 @@
     var t = inputs[r + dr] && inputs[r + dr][c + dc];
     if (t) { e.preventDefault(); if (e.key === "Enter") e.target.blur(); t.focus(); }
   }
-  async function lessonDialog(aid, l, reload) {
-    var data = l || { date: new Date().toISOString().slice(0, 10) };
+  async function lessonDialog(aid, l, reload, onlyDates) {
+    var today0 = new Date().toISOString().slice(0, 10);
+    var data = l || { date: onlyDates && onlyDates.length && onlyDates.indexOf(today0) < 0 ? onlyDates[onlyDates.length - 1] : today0 };
     var K = null;
     try { K = await GET("/api/assignments/" + aid + "/ktp"); } catch (e) { K = null; }
-    var f = buildForm([{ k: "date", label: "Дата", type: "date" }, { k: "work_type", label: "Вид работы", type: "list", options: ["контрольная работа", "самостоятельная работа", "диктант", "изложение", "сочинение", "тест", "лабораторная работа", "практическая работа", "зачёт", "проверочная работа"] },
+    var f = buildForm([onlyDates && onlyDates.length ? { k: "date", label: "Дата (замена)", type: "select", options: onlyDates.map(function (d) { return [d, fmtDate(d)]; }) } : { k: "date", label: "Дата", type: "date" }, { k: "work_type", label: "Вид работы", type: "list", options: ["контрольная работа", "самостоятельная работа", "диктант", "изложение", "сочинение", "тест", "лабораторная работа", "практическая работа", "зачёт", "проверочная работа"] },
       { k: "topic", label: "Тема урока", wide: true }, { k: "homework", label: "Домашнее задание", wide: true }], data);
     var ksel = null;
     if (K && K.items.length) {
@@ -1120,6 +1197,8 @@
     ["class_subjects", "Анализ класса по предметам (уровни, КЗ, СОУ)", "class"],
     ["class_students", "Рейтинг учащихся класса", "class"],
     ["attendance", "Пропуски уроков по классу", "class_dates"],
+    ["absences", "Пропуски уроков по причинам (болезнь, уважительная, без уважительной)", "class_dates"],
+    ["subs", "Учёт замещённых уроков (замены учителей)", "dates"],
     ["students_list", "Список учащихся класса (персональные данные)", "class_only"],
     ["student", "Табель / сведения об учащемся для законных представителей", "student"],
     ["school", "Успеваемость по классам и параллелям учреждения", "all"],
@@ -1133,7 +1212,7 @@
   ROUTES.reports = async function (params) {
     head("Отчёты и аналитика", "Все отчёты можно распечатать или выгрузить в Excel");
     var u = S.me.user;
-    var avail = REPORTS.filter(function (r) { return (["all", "grade", "category", "levels"].indexOf(r[2]) < 0 || u.can_manage || u.role === "viewer") && (r[0] !== "attendance" || journalOn()); });
+    var avail = REPORTS.filter(function (r) { return (["all", "grade", "category", "levels"].indexOf(r[2]) < 0 || u.can_manage || u.role === "viewer") && (["attendance", "absences"].indexOf(r[0]) < 0 || journalOn()) && (r[0] !== "subs" || featOn("subs")); });
     var type = sel(avail.map(function (r) { return [r[0], r[1]]; }), params.type || avail[0][0]);
     var bar = h("div", { class: "bar" }, type);
     var pbar = h("div", { class: "bar" });
@@ -1171,6 +1250,11 @@
       if (need === "class_dates") {
         var p = S._periods.filter(function (x) { return x.kind === curKind(); })[0] || {};
         ctrls.from = h("input", { type: "date", value: params.from || p.start_date || "" }); ctrls.to = h("input", { type: "date", value: params.to || p.end_date || "" });
+        pbar.appendChild(field("с", ctrls.from)); pbar.appendChild(field("по", ctrls.to));
+      }
+      if (need === "dates") {
+        var t0 = new Date(); var m0 = t0.toISOString().slice(0, 8) + "01";
+        ctrls.from = h("input", { type: "date", value: params.from || m0 }); ctrls.to = h("input", { type: "date", value: params.to || t0.toISOString().slice(0, 10) });
         pbar.appendChild(field("с", ctrls.from)); pbar.appendChild(field("по", ctrls.to));
       }
       if (need === "category") {
@@ -1723,7 +1807,7 @@
   ROUTES.admin = async function (params) {
     head("Администрирование");
     var tab = params.tab || "users";
-    var tabs = [["users", "Пользователи"], ["rules", "Настройки и правила"], ["fields", "Тип и поля"], ["transfer", "Перенос данных"], ["startschool", "Импорт из «Старт ШКОЛА»"], ["schooltest", "Связь с SchoolTest"], ["backup", "Резервные копии"], ["audit", "Журнал действий"]];
+    var tabs = [["users", "Пользователи"], ["features", "Функции программы"], ["rules", "Настройки и правила"], ["fields", "Тип и поля"], ["transfer", "Перенос данных"], ["startschool", "Импорт из «Старт ШКОЛА»"], ["schooltest", "Связь с SchoolTest"], ["backup", "Резервные копии"], ["audit", "Журнал действий"]];
     if (deptMode()) tabs = tabs.filter(function (t) { return t[0] !== "startschool"; });
     $main.appendChild(h("div", { class: "tabs" }, tabs.map(function (t) {
       return h("a", { href: "javascript:void 0", class: tab === t[0] ? "on" : "", onclick: function () { params.tab = t[0]; setParams(params); route(); } }, t[1]);
@@ -1770,6 +1854,32 @@
             h("td", null, (u.active ? "активен" : "отключён") + (u.must_change ? " · ждёт смены пароля" : "")));
         })))));
       $main.appendChild(h("div", { class: "hint" }, "Роли: администратор — всё; директор/заместитель — все данные, отчёты, закрытие периодов; учительская (общий доступ) — отметки за периоды и поведение по всем классам, без изменения списков и предметов; классный руководитель — свой класс и свои предметы; учитель — свои журналы; только просмотр — отчёты."));
+    } else if (tab === "features") {
+      var FL = S.me.feature_list || [];
+      var st = Object.assign({}, S.me.features);
+      var box = h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Функции программы"),
+        h("p", { class: "hint" }, "Снимите отметку с функций, которыми учреждение не пользуется: пункт исчезнет из меню у всех пользователей, а сама функция будет закрыта. Данные не удаляются — при повторном включении всё вернётся."));
+      var groups = {};
+      FL.forEach(function (f) { (groups[f.group] = groups[f.group] || []).push(f); });
+      Object.keys(groups).forEach(function (g) {
+        box.appendChild(h("h3", null, g));
+        groups[g].forEach(function (f) {
+          var c = h("input", { type: "checkbox", checked: st[f.key] !== false });
+          c.onchange = function () { st[f.key] = c.checked; };
+          box.appendChild(h("label", { style: { display: "block", margin: "4px 0" } }, c, " ", f.name,
+            f.key === "journal" ? h("span", { class: "muted", style: { fontSize: "12px" } }, " — без журнала программа работает в режиме «только ведомости»") : null));
+        });
+      });
+      var upd = h("input", { type: "checkbox" });
+      try { var U0 = await GET("/api/update_check"); upd.checked = U0.enabled !== false; } catch (e) { upd.checked = true; }
+      box.appendChild(h("h3", null, "Обновления"));
+      box.appendChild(h("label", { style: { display: "block", margin: "4px 0" } }, upd, " Проверять наличие новой версии на GitHub (нужен доступ в интернет; данные учреждения не передаются)"));
+      box.appendChild(h("div", { class: "bar", style: { marginTop: "12px" } }, h("button", { class: "pri", onclick: safe(async function () {
+        S.me.features = await PUT("/api/features", st);
+        await PUT("/api/update_check", { enabled: upd.checked });
+        toast("Сохранено"); renderShell(); route();
+      }) }, "Сохранить")));
+      $main.appendChild(box);
     } else if (tab === "fields") {
       $main.appendChild(h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Тип организации"),
         h("div", { class: "bar" },
@@ -1880,17 +1990,680 @@
   ROUTES.about = async function () {
     var a = S.me.about;
     head("О программе");
+    var updBox = h("p", { class: "muted" }, "Проверка обновлений…");
+    GET("/api/update_check").then(function (U) {
+      clear(updBox);
+      if (U.enabled === false) updBox.textContent = "Проверка обновлений отключена администратором.";
+      else if (U.error) updBox.textContent = U.error + ". Установленная версия: " + U.current + ".";
+      else if (U.newer) { updBox.className = "warnbox"; updBox.appendChild(h("span", null, "Доступна новая версия " + U.latest + (U.published ? " от " + fmtDate(U.published) : "") + ". ")); updBox.appendChild(h("a", { href: U.url, target: "_blank", rel: "noopener" }, "Скачать")); }
+      else updBox.textContent = "Установлена последняя версия (" + U.current + ").";
+    }).catch(function () { updBox.textContent = ""; });
     $main.appendChild(h("div", { class: "card about" },
       h("div", { style: { display: "flex", gap: "18px", alignItems: "center" } }, h("img", { src: "icon.svg", style: { width: "72px" } }),
         h("div", null, h("h1", null, a.name + " " + a.version), h("div", { class: "muted" }, "Учёт результатов учебной деятельности учащихся учреждений общего среднего образования Республики Беларусь"))),
       h("h3", null, "Разработчик"),
       h("p", null, a.org), h("p", null, "Разработчик: " + a.author), h("p", null, a.city_year),
+      h("h3", null, "Где скачать актуальную версию"),
+      h("p", null, "SchoolGrade: ", h("a", { href: "https://github.com/oo-syp/SchoolGrade/releases/latest", target: "_blank", rel: "noopener" }, "github.com/oo-syp/SchoolGrade/releases/latest")),
+      h("p", null, "SchoolTest — подсистема тестирования учащихся в локальной сети (передаёт отметки в журнал SchoolGrade): ",
+        h("a", { href: "https://github.com/oo-syp/SchoolTest/releases/latest", target: "_blank", rel: "noopener" }, "github.com/oo-syp/SchoolTest/releases/latest")),
+      updBox,
       h("h3", null, "Нормативная основа"),
       h("p", null, "Кодекс Республики Беларусь об образовании; Правила проведения аттестации учащихся при освоении содержания образовательных программ общего среднего образования (постановление Министерства образования РБ от 11.07.2022 № 184, с изменениями); нормы оценки результатов учебной деятельности учащихся по учебным предметам; Закон Республики Беларусь «О защите персональных данных» от 07.05.2021 № 99-З."),
       h("h3", null, "Система оценивания"),
       h("p", null, "10-балльная шкала, пять уровней: низкий (1–2), удовлетворительный (3–4), средний (5–6), достаточный (7–8), высокий (9–10). Также: зач., незач., осв., н/а, н/и; поведение — прим., уд., неуд."),
       h("p", { class: "muted" }, "Программа развивает идеи табличного комплекса «Старт ШКОЛА» (ИП Кудласевич В.В., 2005–2006) и не использует его код.")));
   };
+
+  // ===================================================================== 1.4: журнал ФЗ и ОпИ (по месяцам, включая каникулы)
+  function yearMonths() {
+    var y = S.year || {};
+    var st = (y.start_date || (new Date().getFullYear() + "-09-01")).slice(0, 7);
+    var out = [], yy = +st.slice(0, 4), mm = +st.slice(5, 7);
+    var names = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"];
+    for (var i = 0; i < 12; i++) {
+      out.push([yy + "-" + (mm < 10 ? "0" : "") + mm, names[mm - 1] + " " + yy]);
+      mm++; if (mm > 12) { mm = 1; yy++; }
+    }
+    return out;
+  }
+  ROUTES.clubs = async function (params) {
+    await loadPeriods();
+    head("Журнал факультативов и объединений по интересам", "Учёт посещения по месяцам; занятия можно проводить и в каникулы");
+    var all = await GET("/api/assignments", { year_id: yid() });
+    var clubs = all.filter(function (a) { return a.category && a.category !== "subject"; });
+    var months = yearMonths();
+    var now = new Date().toISOString().slice(0, 7);
+    var ms = sel(months, params.month || (months.some(function (m) { return m[0] === now; }) ? now : months[0][0]));
+    var bar = h("div", { class: "bar" }, h("span", null, "Месяц:"), ms);
+    $main.appendChild(bar);
+    var area = h("div");
+    $main.appendChild(area);
+    if (!clubs.length) { area.appendChild(h("div", { class: "card muted" }, "Факультативы и объединения по интересам не назначены (раздел «Классы и нагрузка», категории ФЗ и ОпИ).")); return; }
+    var mine = S.me.user.staff_ids || [];
+    clubs.sort(function (a, b) { return (mine.indexOf(b.teacher_id) >= 0) - (mine.indexOf(a.teacher_id) >= 0) || (a.category > b.category ? 1 : -1) || a.class_name.localeCompare(b.class_name, "ru"); });
+    var load = safe(async function () {
+      clear(area);
+      params.month = ms.value; setParams(params);
+      var grid = h("div", { class: "subjgrid" }, clubs.map(function (a) {
+        return h("a", { href: "javascript:void 0", class: "subjcard" + (String(a.id) === String(params.aid) ? " on" : ""),
+          onclick: function () { params.aid = a.id; setParams(params); load(); } },
+          h("b", null, a.subject + (a.group_name ? " (" + a.group_name + ")" : "")),
+          h("small", null, (a.category === "fz" ? "ФЗ" : "ОпИ") + " · " + a.class_name + " · " + (a.teacher || "—")));
+      }));
+      area.appendChild(h("div", { class: "card" }, grid));
+      if (params.aid && clubs.some(function (a) { return String(a.id) === String(params.aid); })) {
+        var jarea = h("div"); area.appendChild(jarea);
+        renderJournal(jarea, await GET("/api/journal/" + params.aid, { month: ms.value }), load);
+      }
+    });
+    ms.onchange = load;
+    load();
+  };
+
+  // ===================================================================== печать журнала по форме
+  function printJournal(J) {
+    var a = J.assignment, L = J.lessons, per = 25;
+    var esc = function (t) { return String(t == null ? "" : t).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); };
+    var title = esc(a.class_name + " класс · " + a.subject + (a.group_name ? " (" + a.group_name + ")" : "")) + " · учитель: " + esc(a.teacher || "—") +
+      " · " + esc(J.period ? J.period.name : (J.month || ""));
+    var html = "";
+    var chunks = [];
+    for (var i = 0; i < Math.max(1, L.length); i += per) chunks.push(L.slice(i, i + per));
+    chunks.forEach(function (ch, pi) {
+      html += "<div class='pg'><div class='ttl'>" + title + (chunks.length > 1 ? " · лист " + (pi + 1) : "") + "</div><table class='m'><tr><th class='n'>№</th><th class='nm'>Фамилия, имя</th>";
+      ch.forEach(function (l) { var d = l.date.split("-"); html += "<th class='d'>" + d[2] + "<br>" + d[1] + "</th>"; });
+      for (var k = ch.length; k < per; k++) html += "<th class='d'></th>";
+      html += "</tr>";
+      J.students.forEach(function (s, ri) {
+        html += "<tr><td class='n'>" + (ri + 1) + "</td><td class='nm'>" + esc(s.name) + "</td>";
+        ch.forEach(function (l) { html += "<td>" + esc(J.marks[l.id + "_" + s.id] || "") + "</td>"; });
+        for (var k = ch.length; k < per; k++) html += "<td></td>";
+        html += "</tr>";
+      });
+      html += "</table></div><div class='pg'><div class='ttl'>" + title + " · содержание</div><table class='t'><tr><th class='dt'>Дата</th><th>Тема урока</th><th class='hw'>Домашнее задание</th></tr>";
+      ch.forEach(function (l) {
+        html += "<tr><td>" + fmtDate(l.date) + (l.num > 1 ? " (" + l.num + ")" : "") + "</td><td>" + esc(l.topic) + (l.work_type ? " <i>[" + esc(l.work_type) + "]</i>" : "") +
+          (l.sub_teacher ? " <i>(замена: " + esc(l.sub_teacher) + ")</i>" : "") + "</td><td>" + esc(l.homework) + "</td></tr>";
+      });
+      html += "</table></div>";
+    });
+    var w = window.open("", "_blank");
+    if (!w) { toast("Разрешите всплывающие окна для печати", true); return; }
+    w.document.write("<!DOCTYPE html><html><head><meta charset='utf-8'><title>Журнал — " + esc(a.class_name + " " + a.subject) + "</title><style>" +
+      "@page{size:A4 landscape;margin:10mm}body{font:11px 'Times New Roman',serif;margin:0}.pg{page-break-after:always;padding:4mm}" +
+      ".ttl{font-weight:bold;margin-bottom:4px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #000;padding:1px 3px;height:15px}" +
+      "th{font-size:10px}td{text-align:center}.nm{text-align:left;width:46mm;white-space:nowrap;overflow:hidden}.n{width:6mm}.d{width:7mm}" +
+      ".t td{text-align:left;vertical-align:top}.dt{width:22mm}.hw{width:70mm}@media screen{.pg{border-bottom:2px dashed #999;margin-bottom:10px}}@media print{.noprint{display:none}}" +
+      "</style></head><body><div style='padding:6px' class='noprint'><button onclick='window.print()'>Печать</button></div>" + html + "</body></html>");
+    w.document.close();
+  }
+
+  // ===================================================================== расписание
+  var WD = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
+  ROUTES.schedule = async function (params) {
+    await loadPeriods();
+    head("Расписание уроков", "Версии расписания действуют с указанной даты; поддерживаются чётная и нечётная недели");
+    var tab = params.tab || "day";
+    var u = S.me.user;
+    var tabs = [["day", "На день"], ["grid", "Сетка класса"], ["teachers", "Учителя"], ["versions", "Версии, звонки, загрузка"]];
+    $main.appendChild(h("div", { class: "tabs" }, tabs.map(function (t) {
+      return h("a", { href: "javascript:void 0", class: tab === t[0] ? "on" : "", onclick: function () { location.hash = "#/schedule?tab=" + t[0]; } }, t[1]);
+    })));
+    var L = await GET("/api/schedule", { year_id: yid() });
+    var area = h("div"); $main.appendChild(area);
+    if (!L.versions.length && tab !== "versions") {
+      area.appendChild(h("div", { class: "card" }, "Расписание ещё не введено. ", L.can_edit ? h("a", { href: "#/schedule?tab=versions" }, "Создайте первую версию расписания") : "Его вводит администрация."));
+      return;
+    }
+    var bells = L.bells || {};
+    var bell = function (n) { var b = bells[n]; return b ? b[0] + "–" + b[1] : ""; };
+    var classes = await GET("/api/classes", { year_id: yid() });
+    var vsel = function (val) { return sel(L.versions.map(function (v) { return [v.id, v.name + " (с " + fmtDate(v.start_date) + (v.end_date ? " по " + fmtDate(v.end_date) : "") + (v.weeks === 2 ? ", 2 недели" : "") + ")"]; }), val || L.versions[L.versions.length - 1].id); };
+
+    if (tab === "day") {
+      var date = h("input", { type: "date", value: params.date || new Date().toISOString().slice(0, 10) });
+      var who = sel([["school", "Вся школа"], ["mine", "Мои уроки"]].concat(classes.map(function (c) { return ["c" + c.id, c.name + " класс"]; })), params.who || ((u.staff_ids || []).length ? "mine" : "school"));
+      var res = h("div");
+      area.appendChild(h("div", { class: "bar" }, date, who)); area.appendChild(res);
+      var load = safe(async function () {
+        params.date = date.value; params.who = who.value; setParams(params);
+        var q = { date: date.value };
+        if (who.value === "mine") q.staff_id = (u.staff_ids || [])[0];
+        if (who.value.charAt(0) === "c") q.class_id = who.value.slice(1);
+        var D = await GET("/api/schedule/day", q);
+        clear(res);
+        var head2 = h("div", { class: "bar" }, h("b", null, ["", "Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"][D.weekday] + ", " + fmtDate(D.date)),
+          D.week ? h("span", { class: "pill" }, D.week === 1 ? "1-я (нечётная) неделя" : "2-я (чётная) неделя") : null,
+          D.schedule ? h("span", { class: "muted" }, D.schedule.name) : h("span", { class: "pill warn" }, "на эту дату расписания нет"));
+        res.appendChild(head2);
+        if (!D.lessons.length) { res.appendChild(h("div", { class: "card muted" }, "Уроков нет.")); return; }
+        if (who.value === "school") {
+          var cls = []; D.lessons.forEach(function (l) { if (cls.indexOf(l.class_name) < 0) cls.push(l.class_name); });
+          cls.sort(function (x, y) { return x.localeCompare(y, "ru", { numeric: true }); });
+          var nums = []; D.lessons.forEach(function (l) { if (nums.indexOf(l.lesson_no) < 0) nums.push(l.lesson_no); }); nums.sort(function (x, y) { return x - y; });
+          res.appendChild(h("div", { class: "card tw" }, h("table", { class: "t sched" },
+            h("thead", null, h("tr", null, h("th", null, "Урок"), cls.map(function (c) { return h("th", null, c); }))),
+            h("tbody", null, nums.map(function (n) {
+              return h("tr", null, h("td", { class: "n" }, n, h("div", { class: "muted", style: { fontSize: "11px" } }, bell(n))), cls.map(function (c) {
+                var ls = D.lessons.filter(function (l) { return l.lesson_no === n && l.class_name === c; });
+                return h("td", null, ls.map(function (l) {
+                  return h("div", { class: l.sub_teacher ? "subcell" : "" }, h("b", null, l.subject), h("div", { class: "muted", style: { fontSize: "11px" } },
+                    (l.sub_teacher ? "замена: " + l.sub_teacher : l.teacher) + (l.room ? " · каб. " + l.room : "")));
+                }));
+              }));
+            })))));
+        } else {
+          res.appendChild(h("div", { class: "card" }, h("table", { class: "t" }, h("thead", null, h("tr", null, ["Урок", "Время", "Класс", "Предмет", "Учитель", "Каб.", ""].map(function (x) { return h("th", null, x); }))),
+            h("tbody", null, D.lessons.map(function (l) {
+              return h("tr", { class: l.sub_teacher ? "subrow" : "" }, h("td", { class: "n" }, l.lesson_no), h("td", null, bell(l.lesson_no)), h("td", null, l.class_name), h("td", null, l.subject),
+                h("td", null, l.sub_teacher ? h("span", null, h("s", { class: "muted" }, l.teacher), " → ", h("b", null, l.sub_teacher)) : l.teacher), h("td", null, l.room),
+                h("td", null, journalOn() ? h("a", { href: "#/journal?cid=" + l.class_id + "&aid=" + l.assignment_id }, "журнал") : null));
+            })))));
+        }
+      });
+      date.onchange = load; who.onchange = load; load();
+    }
+
+    if (tab === "grid") {
+      var vs = vsel(params.sid);
+      var cs = sel(classes.map(function (c) { return [c.id, c.name + " класс"]; }), params.cid || (u.own_classes[0] || (classes[0] && classes[0].id)));
+      var wk = sel([["1", "1-я (нечётная) неделя"], ["2", "2-я (чётная) неделя"]], params.week || "1");
+      var res2 = h("div");
+      area.appendChild(h("div", { class: "bar" }, vs, cs, wk)); area.appendChild(res2);
+      var load2 = safe(async function () {
+        params.sid = vs.value; params.cid = cs.value; params.week = wk.value; setParams(params);
+        var D = await GET("/api/schedule/" + vs.value + "/class/" + cs.value);
+        wk.style.display = D.schedule.weeks === 2 ? "" : "none";
+        var week = D.schedule.weeks === 2 ? +wk.value : 1;
+        var items = D.items.slice();
+        clear(res2);
+        var edit = L.can_edit;
+        var opts = [["", "—"]].concat(D.assignments.map(function (a) { return [a.id, (a.short || a.subject) + (a.group_name ? " (" + a.group_name + ")" : "") + (a.category !== "subject" ? (a.category === "fz" ? " · ФЗ" : " · ОпИ") : "")]; }));
+        var maxN = Math.max(7, items.reduce(function (m, x) { return Math.max(m, x.lesson_no); }, 0) + 1);
+        var cellFor = function (wd, n) { return items.filter(function (x) { return x.week === week && x.weekday === wd && x.lesson_no === n; }); };
+        var tb = h("tbody");
+        var counts = h("div", { class: "hint" });
+        var recount = function () {
+          var c = {};
+          items.filter(function (x) { return x.week === week; }).forEach(function (x) { c[x.assignment_id] = (c[x.assignment_id] || 0) + 1; });
+          counts.textContent = "Часов в неделю по расписанию / по нагрузке: " + D.assignments.map(function (a) {
+            return (a.short || a.subject) + (a.group_name ? " (" + a.group_name + ")" : "") + " " + (c[a.id] || 0) + "/" + String(a.hours).replace(".", ",");
+          }).join(" · ");
+        };
+        for (var n = 0; n <= maxN; n++) {
+          (function (n) {
+            if (n === 0 && !items.some(function (x) { return x.lesson_no === 0; })) return;
+            tb.appendChild(h("tr", null, h("td", { class: "n" }, n, h("div", { class: "muted", style: { fontSize: "11px" } }, bell(n))), WD.map(function (_d, i) {
+              var wd = i + 1;
+              var cur = cellFor(wd, n);
+              var td = h("td", { class: "scell" });
+              var draw = function () {
+                clear(td);
+                cur = cellFor(wd, n);
+                var row = function (it) {
+                  var s1 = sel(opts, it ? it.assignment_id : "", { disabled: !edit });
+                  var room = h("input", { value: it ? it.room || "" : "", placeholder: "каб.", class: "room", disabled: !edit });
+                  s1.onchange = function () {
+                    if (it && !s1.value) { items.splice(items.indexOf(it), 1); }
+                    else if (it) it.assignment_id = +s1.value;
+                    else if (s1.value) items.push({ week: week, weekday: wd, lesson_no: n, assignment_id: +s1.value, room: room.value });
+                    dirty = true; draw(); recount();
+                  };
+                  room.oninput = function () { if (it) { it.room = room.value; dirty = true; } };
+                  return h("div", { class: "srow" }, s1, room);
+                };
+                cur.forEach(function (it) { td.appendChild(row(it)); });
+                if (!cur.length) td.appendChild(row(null));
+                else if (edit) td.appendChild(h("a", { href: "javascript:void 0", class: "muted", style: { fontSize: "11px" }, title: "Второй предмет в это время (деление на группы)", onclick: function () {
+                  var free = D.assignments.filter(function (a) { return !cur.some(function (x) { return x.assignment_id === a.id; }); })[0];
+                  if (free) { items.push({ week: week, weekday: wd, lesson_no: n, assignment_id: free.id, room: "" }); dirty = true; draw(); recount(); }
+                } }, "+ группа"));
+              };
+              draw();
+              return td;
+            })));
+          })(n);
+        }
+        var dirty = false;
+        res2.appendChild(h("div", { class: "card tw" }, h("table", { class: "t sgrid" }, h("thead", null, h("tr", null, h("th", null, "№"), WD.map(function (d) { return h("th", null, d); }))), tb), counts));
+        recount();
+        if (D.conflicts.length) res2.appendChild(h("div", { class: "card warnbox" }, h("b", null, "Пересечения: учитель в одно время в разных классах"),
+          h("ul", null, D.conflicts.map(function (c) { return h("li", null, (D.schedule.weeks === 2 ? c.week + "-я нед., " : "") + WD[c.weekday - 1] + ", " + c.lesson_no + " урок — " + c.teacher + ": " + c.classes.join(", ")); }))));
+        if (edit) res2.appendChild(h("div", { class: "bar" }, h("button", { class: "pri", onclick: safe(async function () {
+          var r = await PUT("/api/schedule/" + vs.value + "/class/" + cs.value, { items: items });
+          toast("Расписание класса сохранено" + (r.conflicts.length ? ". Есть пересечения учителей!" : "")); load2();
+        }) }, "Сохранить"), D.schedule.weeks === 2 ? h("button", { onclick: function () {
+          var other = week === 1 ? 2 : 1;
+          if (!confirmBox("Заменить расписание " + other + "-й недели копией " + week + "-й?")) return;
+          items = items.filter(function (x) { return x.week !== other; }).concat(items.filter(function (x) { return x.week === week; }).map(function (x) { return Object.assign({}, x, { week: other }); }));
+          toast("Скопировано — нажмите «Сохранить»");
+        } }, "Скопировать в другую неделю") : null));
+      });
+      vs.onchange = load2; cs.onchange = load2; wk.onchange = load2; load2();
+    }
+
+    if (tab === "teachers") {
+      var vs3 = vsel(params.sid);
+      var res3 = h("div");
+      area.appendChild(h("div", { class: "bar" }, vs3, h("button", { onclick: function () { window.print(); } }, "Печать"))); area.appendChild(res3);
+      var load3 = safe(async function () {
+        params.sid = vs3.value; setParams(params);
+        var D = await GET("/api/schedule/" + vs3.value + "/teachers");
+        clear(res3);
+        var weeks = D.schedule.weeks === 2 ? [1, 2] : [1];
+        var nums = [1, 2, 3, 4, 5, 6, 7, 8];
+        weeks.forEach(function (w) {
+          res3.appendChild(h("div", { class: "card tw" }, weeks.length > 1 ? h("h3", { style: { marginTop: 0 } }, w + "-я неделя") : null,
+            h("table", { class: "t tgrid" }, h("thead", null, h("tr", null, h("th", { rowspan: 2 }, "Учитель"), h("th", { rowspan: 2 }, "Ч/нед"), WD.map(function (d) { return h("th", { colspan: nums.length }, d); })),
+              h("tr", null, WD.map(function () { return nums.map(function (n) { return h("th", { class: "n" }, n); }); }))),
+              h("tbody", null, D.teachers.map(function (t) {
+                return h("tr", null, h("td", { class: "nm" }, t.name), h("td", { class: "n" }, t.hours), WD.map(function (_d, i) {
+                  return nums.map(function (n) { var c = t.cells[w + "_" + (i + 1) + "_" + n]; return h("td", { class: "n" + (c && c.length > 1 ? " conflict" : "") }, c ? c.join(",") : ""); });
+                }));
+              })))));
+        });
+      });
+      vs3.onchange = load3; load3();
+    }
+
+    if (tab === "versions") {
+      var card = h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Версии расписания"));
+      card.appendChild(L.versions.length ? h("table", { class: "t" }, h("thead", null, h("tr", null, ["Название", "Действует", "Недель", "Уроков в сетке", ""].map(function (x) { return h("th", null, x); }))),
+        h("tbody", null, L.versions.map(function (v) {
+          return h("tr", null, h("td", null, v.name), h("td", null, "с " + fmtDate(v.start_date) + (v.end_date ? " по " + fmtDate(v.end_date) : "")), h("td", { class: "n" }, v.weeks), h("td", { class: "n" }, v.items),
+            h("td", null, L.can_edit ? [
+              h("button", { onclick: function () { location.hash = "#/schedule?tab=grid&sid=" + v.id; } }, "Сетка"), " ",
+              h("button", { onclick: safe(async function () { await importSched(v); }) }, "Загрузить из Excel"), " ",
+              h("button", { class: "danger", onclick: safe(async function () { if (!confirmBox("Удалить версию «" + v.name + "»?")) return; await DEL("/api/schedule/" + v.id); route(); }) }, "Удалить")] : null));
+        }))) : h("div", { class: "muted" }, "Версий пока нет."));
+      if (L.can_edit) card.appendChild(h("div", { class: "bar", style: { marginTop: "10px" } }, h("button", { class: "pri", onclick: function () {
+        var f = buildForm([{ k: "name", label: "Название", wide: true }, { k: "start_date", label: "Действует с", type: "date" },
+          { k: "weeks", label: "Чередование", type: "select", options: [[1, "одна неделя"], [2, "две недели (нечётная / чётная)"]] },
+          { k: "copy_from", label: "Скопировать сетку из", type: "select", options: [["", "— пустая —"]].concat(L.versions.map(function (v) { return [v.id, v.name]; })) }],
+          { start_date: new Date().toISOString().slice(0, 10), weeks: 1, copy_from: L.versions.length ? L.versions[L.versions.length - 1].id : "" });
+        modal("Новая версия расписания", h("div", null, f, h("div", { class: "hint" }, "Новая версия действует с указанной даты; прежние остаются для уже прошедших дат. Для двух недель первая неделя — та, в которую попадает дата начала.")),
+          [{ text: "Создать", cls: "pri", fn: async function () { var r = await POST("/api/schedule", Object.assign(f.values(), { year_id: yid() })); location.hash = "#/schedule?tab=grid&sid=" + r.id; } }]);
+      } }, "+ Новая версия")));
+      area.appendChild(card);
+      var bc = h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Звонки"));
+      var binp = {};
+      var bt = h("div", { class: "bar" });
+      for (var n = 0; n <= 8; n++) {
+        (function (n) {
+          var b = bells[n] || ["", ""];
+          var s1 = h("input", { type: "time", value: b[0], disabled: !L.can_edit }), s2 = h("input", { type: "time", value: b[1], disabled: !L.can_edit });
+          binp[n] = [s1, s2];
+          bt.appendChild(h("div", { class: "bellrow" }, h("b", null, n + " урок"), s1, "–", s2));
+        })(n);
+      }
+      bc.appendChild(bt);
+      if (L.can_edit) bc.appendChild(h("button", { class: "pri", onclick: safe(async function () {
+        var o = {}; Object.keys(binp).forEach(function (k) { if (binp[k][0].value && binp[k][1].value) o[k] = [binp[k][0].value, binp[k][1].value]; });
+        await PUT("/api/schedule/bells", { bells: o }); toast("Звонки сохранены");
+      }) }, "Сохранить звонки"));
+      area.appendChild(bc);
+    }
+
+    async function importSched(v) {
+      var fs = await pickFile(".xlsx,.xls"); if (!fs.length) return;
+      var data = await fileToB64(fs[0]);
+      var r = await POST("/api/schedule/" + v.id + "/import", { filename: fs[0].name, data: data });
+      var body = h("div", null, h("p", null, "Классы: " + r.classes.join(", ") + ". Распознано уроков: " + r.items + "."),
+        r.problems.length ? h("div", { class: "warnbox" }, h("b", null, "Не распознано:"), h("ul", null, r.problems.slice(0, 50).map(function (p) { return h("li", null, p); }))) : null,
+        h("div", { class: "hint" }, "Формат: строка с названиями классов (5А, 5 «Б» …); слева — день недели и номер урока; в ячейках — предмет (как в нагрузке класса или его сокращение) и, при желании, кабинет. Группы — через «/». Сетка загружаемых классов будет заменена."));
+      modal("Загрузка расписания из Excel", body, [{ text: "Загрузить", cls: "pri", fn: async function () {
+        await POST("/api/schedule/" + v.id + "/import", { filename: fs[0].name, data: data, commit: true }); toast("Расписание загружено"); route();
+      } }]);
+    }
+  };
+
+  // ===================================================================== замены
+  ROUTES.subs = async function (params) {
+    await loadPeriods();
+    head("Замены учителей", "Заменяющий учитель получает доступ к журналу предмета на дату замены");
+    var t0 = new Date(), first = t0.toISOString().slice(0, 8) + "01";
+    var from = h("input", { type: "date", value: params.from || first }), to = h("input", { type: "date", value: params.to || "" });
+    var area = h("div");
+    var D0 = await GET("/api/subs", { from: from.value, to: to.value || "9999-12-31" });
+    $main.appendChild(h("div", { class: "bar" }, field("с", from), field("по", to),
+      D0.can_edit ? h("button", { class: "pri", onclick: function () { addDialog(); } }, "+ Замена") : null, h("span", { class: "sp" }),
+      h("button", { onclick: function () { download("/api/reports/subs", { from: from.value, to: to.value || new Date().toISOString().slice(0, 10), format: "xlsx" }); } }, "Отчёт в Excel"),
+      h("a", { class: "btn", href: "#/reports?type=subs" }, "Отчёт за месяц")));
+    $main.appendChild(area);
+    var load = safe(async function () {
+      params.from = from.value; params.to = to.value; setParams(params);
+      var D = await GET("/api/subs", { from: from.value, to: to.value || "9999-12-31" });
+      clear(area);
+      if (!D.items.length) { area.appendChild(h("div", { class: "card muted" }, "Замен за период нет.")); return; }
+      area.appendChild(h("div", { class: "card tw" }, h("table", { class: "t" }, h("thead", null, h("tr", null, ["Дата", "Урок", "Класс", "Предмет", "Отсутствовал", "Причина", "Заменял", "Ч.", "В журнале", ""].map(function (x) { return h("th", null, x); }))),
+        h("tbody", null, D.items.map(function (s) {
+          return h("tr", null, h("td", null, fmtDate(s.date)), h("td", { class: "n" }, s.lesson_no || ""), h("td", null, s.class_name), h("td", null, s.subject), h("td", null, s.absent), h("td", null, s.reason),
+            h("td", null, h("b", null, s.substitute)), h("td", { class: "n" }, String(s.hours).replace(".", ",")), h("td", null, s.lessons ? "✓" : h("a", { href: "#/journal?cid=" + s.class_id + "&aid=" + s.assignment_id }, "открыть")),
+            h("td", null, D.can_edit ? h("a", { href: "javascript:void 0", onclick: safe(async function () { if (!confirmBox("Удалить замену?")) return; await DEL("/api/subs/" + s.id); load(); }) }, "✕") : null));
+        })))));
+    });
+    from.onchange = load; to.onchange = load; load();
+
+    async function addDialog() {
+      var staff = (await GET("/api/staff")).filter(function (s) { return s.active; });
+      var date = h("input", { type: "date", value: new Date().toISOString().slice(0, 10) });
+      var abs = sel([["", "— кто отсутствует —"]].concat(staff.map(function (s) { return [s.id, s.short]; })), "");
+      var reason = h("input", { list: "dl-subr", value: "болезнь" });
+      var plan = h("div");
+      var rows = [];
+      var seq = 0;
+      var draw = safe(async function () {
+        var my = ++seq;
+        clear(plan); rows = [];
+        if (!abs.value) return;
+        var P = await GET("/api/subs/plan", { date: date.value, staff_id: abs.value });
+        if (my !== seq) return;
+        if (P.lessons.length) {
+          plan.appendChild(h("table", { class: "t" }, h("thead", null, h("tr", null, ["Урок", "Класс", "Предмет", "Заменяет"].map(function (x) { return h("th", null, x); }))),
+            h("tbody", null, P.lessons.map(function (l) {
+              var s1 = sel([["", "— не заменять —"]].concat(l.free.map(function (f) { return [f.id, f.name + (l.same_subject.indexOf(f.id) >= 0 ? " (тот же предмет)" : "")]; })), l.current || "");
+              rows.push({ lesson_no: l.lesson_no, assignment_id: l.assignment_id, sel: s1 });
+              return h("tr", null, h("td", { class: "n" }, l.lesson_no), h("td", null, l.class_name), h("td", null, l.subject), h("td", null, s1));
+            }))));
+          plan.appendChild(h("div", { class: "hint" }, "В списке — учителя, свободные на этом уроке по расписанию; сначала — ведущие тот же предмет."));
+        } else {
+          plan.appendChild(h("div", { class: "hint" }, P.has_schedule ? "По расписанию у учителя нет уроков в этот день — добавьте замену вручную." : "Расписание на эту дату не введено — укажите уроки вручную."));
+          var asg = (await GET("/api/assignments", { year_id: yid(), staff_id: abs.value }));
+          if (my !== seq) return;
+          var addRow = function () {
+            var a1 = sel(asg.map(function (a) { return [a.id, a.class_name + " — " + a.subject + (a.group_name ? " (" + a.group_name + ")" : "")]; }));
+            var ln = h("input", { type: "number", min: 0, max: 12, value: 1, style: { width: "60px" } });
+            var s1 = sel(P.staff.filter(function (s) { return String(s.id) !== abs.value; }).map(function (s) { return [s.id, s.name]; }));
+            var r = { ln: ln, a1: a1, sel: s1 };
+            rows.push(r);
+            tbm.appendChild(h("tr", null, h("td", null, ln), h("td", null, a1), h("td", null, s1)));
+          };
+          var tbm = h("tbody");
+          plan.appendChild(h("table", { class: "t" }, h("thead", null, h("tr", null, ["Урок №", "Класс и предмет", "Заменяет"].map(function (x) { return h("th", null, x); }))), tbm));
+          plan.appendChild(h("button", { onclick: addRow }, "+ урок"));
+          addRow();
+        }
+      });
+      date.onchange = draw; abs.onchange = draw;
+      modal("Замена", h("div", null, h("div", { class: "form" }, field("Дата", date), field("Отсутствует", abs), field("Причина", reason)),
+        h("datalist", { id: "dl-subr" }, D0.reasons.map(function (r) { return h("option", { value: r }); })), plan),
+        [{ text: "Сохранить", cls: "pri", fn: async function () {
+          var items = rows.filter(function (r) { return r.sel.value; }).map(function (r) {
+            return { lesson_no: r.ln ? +r.ln.value : r.lesson_no, assignment_id: r.a1 ? +r.a1.value : r.assignment_id, substitute_id: +r.sel.value };
+          });
+          if (!items.length) { toast("Выберите заменяющих", true); return false; }
+          await POST("/api/subs", { date: date.value, absent_id: +abs.value, reason: reason.value, items: items });
+          toast("Замены сохранены: " + items.length); load();
+        } }]);
+    }
+  };
+
+  // ===================================================================== кабинет классного руководителя
+  ROUTES.classroom = async function (params) {
+    await loadPeriods();
+    var u = S.me.user;
+    var classes = (await GET("/api/classes", { year_id: yid() })).filter(function (c) { return u.can_manage || u.own_classes.indexOf(c.id) >= 0; });
+    head("Кабинет классного руководителя");
+    if (!classes.length) { $main.appendChild(h("div", { class: "card muted" }, "Вы не назначены классным руководителем.")); return; }
+    var cs = sel(classes.map(function (c) { return [c.id, c.name + " класс"]; }), params.cid || (classes.filter(function (c) { return u.own_classes.indexOf(c.id) >= 0; })[0] || classes[0]).id);
+    var tab = params.tab || "contacts";
+    var tabs = [["contacts", "Учащиеся и родители"], ["social", "Социальный паспорт"], ["chars", "Характеристики"], ["acts", "Внеурочная занятость"], ["abs", "Пропуски"]];
+    $main.appendChild(h("div", { class: "bar" }, cs));
+    $main.appendChild(h("div", { class: "tabs" }, tabs.map(function (t) {
+      return h("a", { href: "javascript:void 0", class: tab === t[0] ? "on" : "", onclick: function () { params.tab = t[0]; params.cid = cs.value; location.hash = "#/classroom" + qs(params); } }, t[1]);
+    })));
+    cs.onchange = function () { params.cid = cs.value; location.hash = "#/classroom" + qs(params); };
+    var area = h("div"); $main.appendChild(area);
+    var cid = cs.value;
+    var save = function (sid, data) { return PUT("/api/classroom/" + cid + "/student/" + sid, data); };
+    var repBtns = function (path, name) {
+      return h("div", { class: "bar" }, h("span", { class: "sp" }),
+        h("button", { onclick: safe(async function () { var r = await GET("/api/classroom/" + cid + "/" + path); clear(area).appendChild(reportTable(r)); }) }, "Сводная таблица " + name),
+        h("button", { onclick: function () { download("/api/classroom/" + cid + "/" + path, { format: "xlsx" }); } }, "Excel"));
+    };
+
+    if (tab === "abs") return absTab();
+    var C = await GET("/api/classroom/" + cid);
+    var edit = C.can_edit;
+
+    if (tab === "contacts") {
+      area.appendChild(repBtns("contacts", "контактов"));
+      area.appendChild(h("div", { class: "card tw" }, h("table", { class: "t" }, h("thead", null, h("tr", null, ["№", "Учащийся", "Родители (законные представители)", "Телефоны", "Место работы", ""].map(function (x) { return h("th", null, x); }))),
+        h("tbody", null, C.students.map(function (s, i) {
+          var par = s.parents.length ? s.parents : (s.old_parents || s.old_parents_phone ? [{ relation: "", fio: s.old_parents, phone: s.old_parents_phone, work: "" }] : []);
+          return h("tr", null, h("td", { class: "n" }, i + 1), h("td", null, s.name),
+            h("td", null, par.map(function (p) { return h("div", null, (p.relation ? p.relation + ": " : "") + (p.fio || "")); })),
+            h("td", null, par.map(function (p) { return h("div", null, p.phone || ""); })),
+            h("td", { class: "muted" }, par.map(function (p) { return h("div", null, p.work || ""); })),
+            h("td", null, edit ? h("button", { onclick: function () { parentsDialog(s, par); } }, "Изменить") : null));
+        })))));
+    }
+    function parentsDialog(s, par) {
+      var list = par.map(function (p) { return Object.assign({}, p); });
+      if (!list.length) list = [{ relation: "мать" }, { relation: "отец" }];
+      var box = h("div");
+      var draw = function () {
+        clear(box);
+        list.forEach(function (p, i) {
+          var f = function (k, ph, w) { var e = h("input", { value: p[k] || "", placeholder: ph, style: { width: w } }); e.oninput = function () { p[k] = e.value; }; return e; };
+          box.appendChild(h("div", { class: "bar parrow" }, f("relation", "кем приходится", "110px"), f("fio", "ФИО", "220px"), f("phone", "телефон", "140px"), f("work", "место работы, должность", "220px"),
+            h("a", { href: "javascript:void 0", onclick: function () { list.splice(i, 1); draw(); } }, "✕")));
+        });
+        box.appendChild(h("button", { onclick: function () { list.push({ relation: "" }); draw(); } }, "+ ещё"));
+      };
+      draw();
+      modal("Родители: " + s.name, box, [{ text: "Сохранить", cls: "pri", fn: async function () { await save(s.id, { parents: list }); toast("Сохранено"); route(); } }]);
+    }
+
+    if (tab === "social") {
+      area.appendChild(repBtns("social", "соцпаспорта"));
+      var tb = h("tbody");
+      C.students.forEach(function (s, i) {
+        var chosen = s.social.slice();
+        tb.appendChild(h("tr", null, h("td", { class: "n" }, i + 1), h("td", { class: "nm" }, s.name), C.social_list.map(function (c) {
+          var ch = h("input", { type: "checkbox", checked: chosen.indexOf(c.key) >= 0, disabled: !edit });
+          ch.onchange = safe(async function () {
+            if (ch.checked) chosen.push(c.key); else chosen.splice(chosen.indexOf(c.key), 1);
+            await save(s.id, { social: chosen, social_note: s.social_note });
+          });
+          return h("td", { class: "n" }, ch);
+        })));
+      });
+      area.appendChild(h("div", { class: "card tw" }, h("table", { class: "t social" }, h("thead", null, h("tr", null, h("th", null, "№"), h("th", null, "Учащийся"),
+        C.social_list.map(function (c) { return h("th", { class: "vert", title: c.name }, c.name); }))), tb),
+        h("div", { class: "hint" }, "Отметки сохраняются сразу. Сведения доступны только классному руководителю и администрации.")));
+    }
+
+    if (tab === "chars") {
+      area.appendChild(h("div", { class: "card tw" }, h("table", { class: "t" }, h("thead", null, h("tr", null, ["№", "Учащийся", "Характеристика", ""].map(function (x) { return h("th", null, x); }))),
+        h("tbody", null, C.students.map(function (s, i) {
+          return h("tr", null, h("td", { class: "n" }, i + 1), h("td", null, s.name),
+            h("td", { class: "muted" }, s.characteristic ? s.characteristic.slice(0, 120) + (s.characteristic.length > 120 ? "…" : "") : "не заполнена"),
+            h("td", { style: { whiteSpace: "nowrap" } }, edit ? h("button", { onclick: function () { charDialog(s); } }, "Изменить") : null, " ",
+              s.characteristic ? h("button", { onclick: function () { download("/api/classroom/" + cid + "/characteristic/" + s.id); } }, "Word") : null));
+        })))));
+    }
+    function charDialog(s) {
+      var ta = h("textarea", { rows: 18, style: { width: "100%", fontFamily: "'Times New Roman',serif", fontSize: "15px" } });
+      ta.value = s.characteristic || ("Учащийся(аяся) " + s.name + " обучается в " + C["class"].name + " классе.\n\nУчебная деятельность: \n\nОтношение к учёбе и труду: \n\nУчастие в жизни класса и учреждения: \n\nВнеурочная занятость: " +
+        s.clubs.map(function (x) { return x.name; }).concat(s.activities.map(function (x) { return x.name; })).join(", ") + "\n\nВзаимоотношения со сверстниками и взрослыми: \n\nЛичные качества: ");
+      modal("Характеристика: " + s.name, h("div", null, ta, h("div", { class: "hint" }, "Абзацы разделяйте пустой строкой. Документ Word формируется с шапкой и строками для подписей.")),
+        [{ text: "Сохранить", cls: "pri", fn: async function () { await save(s.id, { characteristic: ta.value }); toast("Сохранено"); route(); } },
+         { text: "Сохранить и скачать Word", fn: async function () { await save(s.id, { characteristic: ta.value }); download("/api/classroom/" + cid + "/characteristic/" + s.id); route(); } }]);
+    }
+
+    if (tab === "acts") {
+      area.appendChild(repBtns("activities", "занятости"));
+      area.appendChild(h("div", { class: "card tw" }, h("table", { class: "t" }, h("thead", null, h("tr", null, ["№", "Учащийся", "В учреждении (ФЗ, ОпИ)", "Вне учреждения", ""].map(function (x) { return h("th", null, x); }))),
+        h("tbody", null, C.students.map(function (s, i) {
+          return h("tr", null, h("td", { class: "n" }, i + 1), h("td", null, s.name),
+            h("td", null, s.clubs.map(function (x) { return h("div", null, x.name + " ", h("span", { class: "muted" }, "(" + x.kind + (x.leader ? ", " + x.leader : "") + ")")); })),
+            h("td", null, s.activities.map(function (x) { return h("div", null, x.name + (x.place ? " — " + x.place : "")); })),
+            h("td", null, edit ? h("button", { onclick: function () { actsDialog(s); } }, "Изменить") : null));
+        }))), h("div", { class: "hint" }, "Факультативы и объединения по интересам учреждения подставляются автоматически по нагрузке (разделу «Классы и нагрузка»).")));
+    }
+    function actsDialog(s) {
+      var list = s.activities.map(function (a) { return Object.assign({}, a); });
+      var box = h("div");
+      var draw = function () {
+        clear(box);
+        list.forEach(function (p, i) {
+          var f = function (k, ph, w) { var e = h("input", { value: p[k] || "", placeholder: ph, style: { width: w } }); e.oninput = function () { p[k] = e.value; }; return e; };
+          box.appendChild(h("div", { class: "bar" }, f("name", "кружок, секция, студия", "200px"), f("place", "где (учреждение)", "180px"), f("leader", "руководитель", "150px"), f("hours", "дни, часы", "110px"),
+            h("a", { href: "javascript:void 0", onclick: function () { list.splice(i, 1); draw(); } }, "✕")));
+        });
+        box.appendChild(h("button", { onclick: function () { list.push({}); draw(); } }, "+ занятие"));
+      };
+      if (!list.length) list.push({});
+      draw();
+      modal("Занятость вне учреждения: " + s.name, box, [{ text: "Сохранить", cls: "pri", fn: async function () { await save(s.id, { activities: list }); toast("Сохранено"); route(); } }]);
+    }
+
+    async function absTab() {
+      var months = yearMonths(), now = new Date().toISOString().slice(0, 7);
+      var ms = sel(months, params.month || now);
+      var res = h("div");
+      area.appendChild(h("div", { class: "bar" }, ms, h("span", { class: "sp" }),
+        h("a", { class: "btn", href: "#/reports?type=absences&class_id=" + cid }, "Отчёт по причинам")));
+      area.appendChild(res);
+      var load = safe(async function () {
+        params.month = ms.value; setParams(params);
+        var D = await GET("/api/classroom/" + cid + "/absences", { month: ms.value });
+        clear(res);
+        var days = D.dates.filter(function (d) { return D.students.some(function (s) { return D.counts[s.id + "_" + d]; }); });
+        if (!days.length) { res.appendChild(h("div", { class: "card muted" }, "В этом месяце пропусков нет.")); return; }
+        var short = { "б": "Б", "у": "У", "н": "Н" };
+        res.appendChild(h("div", { class: "card tw" }, h("table", { class: "t absgrid" }, h("thead", null, h("tr", null, h("th", null, "Учащийся"), days.map(function (d) { return h("th", { class: "n" }, d.slice(8) + "." + d.slice(5, 7)); }))),
+          h("tbody", null, D.students.map(function (s) {
+            return h("tr", null, h("td", { class: "nm" }, s.name), days.map(function (d) {
+              var c = D.counts[s.id + "_" + d], dr = D.days[s.id + "_" + d];
+              if (!c) return h("td");
+              var tr0 = (c.teacher_reasons || "").split("").filter(function (x) { return x; })[0];
+              var lab = dr ? short[dr.reason] : (tr0 ? short[tr0].toLowerCase() : "");
+              return h("td", { class: "n abs " + (dr ? "set" : ""), title: c.n + " ур." + (dr ? " — " + D.reasons[dr.reason] + (dr.note ? " (" + dr.note + ")" : "") : tr0 ? " — учитель: " + D.reasons[tr0] : " — причина не указана"),
+                onclick: function () { if (D.can_edit) reasonDialog(s, d, dr); } }, c.n + (lab ? " " + lab : ""));
+            }));
+          }))), h("div", { class: "hint" }, "Число — пропущено уроков за день. Б — по болезни, У — по уважительной, Н — без уважительной (заглавная — указал классный руководитель, строчная — учитель на уроке). Щёлкните по ячейке, чтобы указать причину на весь день.")));
+      });
+      function reasonDialog(s, d, dr) {
+        var rs = sel([["", "— не указана —"]].concat(Object.keys(D0r).map(function (k) { return [k, D0r[k]]; })), dr ? dr.reason : "б");
+        var note = h("input", { value: dr ? dr.note || "" : "", placeholder: "справка № …, заявление родителей", style: { width: "100%" } });
+        modal(s.name + ", " + fmtDate(d), h("div", null, field("Причина отсутствия (для всех уроков дня)", rs), field("Документ / примечание", note)),
+          [{ text: "Сохранить", cls: "pri", fn: async function () { await PUT("/api/classroom/" + cid + "/absences", { student_id: s.id, date: d, reason: rs.value, note: note.value }); load(); } }]);
+      }
+      var D0r = { "б": "по болезни", "у": "по уважительной причине", "н": "без уважительной причины" };
+      ms.onchange = load; load();
+    }
+  };
+
+  // ===================================================================== прогноз и группа риска, мониторинг
+  ROUTES.risk = async function (params) {
+    await loadPeriods();
+    head("Прогноз и группа риска", "Ожидаемые отметки за период по текущим отметкам и учащиеся, которым нужно внимание");
+    var classes = await GET("/api/classes", { year_id: yid() });
+    var ks = sel(kindsOf(), params.kind || curKind());
+    var cs = sel([["", "Все доступные классы"]].concat(classes.map(function (c) { return [c.id, c.name + " класс"]; })), params.class_id || "");
+    var all = h("input", { type: "checkbox", checked: params.all === "1" });
+    var area = h("div");
+    var args = function () { return { year_id: yid(), kind: ks.value, class_id: cs.value, all: all.checked ? 1 : "" }; };
+    $main.appendChild(h("div", { class: "bar" }, ks, cs, h("label", null, all, " показать всех (не только риск)"),
+      h("button", { class: "pri", onclick: safe(go) }, "Сформировать"), h("button", { onclick: function () { download("/api/reports/risk", Object.assign(args(), { format: "xlsx" })); } }, "Excel"),
+      h("button", { onclick: function () { window.print(); } }, "Печать")));
+    $main.appendChild(area);
+    async function go() { var a = args(); params = Object.assign({}, a); setParams(params); clear(area).appendChild(reportTable(await GET("/api/reports/risk", a))); }
+    safe(go)();
+  };
+  ROUTES.monitor = async function (params) {
+    await loadPeriods();
+    head("Мониторинг заполнения журнала", "Уроки без темы, домашнего задания и отметок; отставание от расписания");
+    var t = new Date(), wk = new Date(t.getTime() - 6 * 864e5);
+    var from = h("input", { type: "date", value: params.from || wk.toISOString().slice(0, 10) }), to = h("input", { type: "date", value: params.to || t.toISOString().slice(0, 10) });
+    var classes = await GET("/api/classes", { year_id: yid() });
+    var cs = sel([["", "Все классы"]].concat(classes.map(function (c) { return [c.id, c.name + " класс"]; })), params.class_id || "");
+    var all = h("input", { type: "checkbox", checked: params.all === "1" });
+    var area = h("div");
+    var args = function () { return { year_id: yid(), from: from.value, to: to.value, class_id: cs.value, all: all.checked ? 1 : "" }; };
+    $main.appendChild(h("div", { class: "bar" }, field("с", from), field("по", to), cs, h("label", null, all, " все нагрузки"),
+      h("button", { class: "pri", onclick: safe(go) }, "Сформировать"), h("button", { onclick: function () { download("/api/reports/monitor", Object.assign(args(), { format: "xlsx" })); } }, "Excel"),
+      h("button", { onclick: function () { window.print(); } }, "Печать")));
+    $main.appendChild(area);
+    async function go() { var a = args(); params = Object.assign({}, a); setParams(params); clear(area).appendChild(reportTable(await GET("/api/reports/monitor", a))); }
+    safe(go)();
+  };
+
+  // ===================================================================== сравнительный анализ
+  ROUTES.analysis = async function (params) {
+    await loadPeriods();
+    head("Сравнительный анализ", "Средний балл и качество знаний по отметкам за периоды — по годам, четвертям, учителям, классам и параллелям");
+    var grp = sel([["parallel", "по параллелям"], ["class", "по классам"], ["teacher", "по учителям"], ["subject", "по предметам"], ["school", "учреждение в целом"]], params.group || "parallel");
+    var metric = sel([["avg", "Средний балл"], ["kz", "Качество знаний, %"]], params.metric || "avg");
+    var kinds = sel([["q1,q2,q3,q4,h1,h2,year", "Четверти (полугодия) и год"], ["year", "Только годовые"]], params.kinds || "q1,q2,q3,q4,h1,h2,year");
+    var subj = h("select");
+    var area = h("div");
+    $main.appendChild(h("div", { class: "bar" }, grp, metric, kinds, subj, h("button", { class: "pri", onclick: safe(go) }, "Показать"),
+      h("button", { onclick: function () { download("/api/reports/analysis", Object.assign(args(), { format: "xlsx" })); } }, "Excel"), h("button", { onclick: function () { window.print(); } }, "Печать")));
+    $main.appendChild(area);
+    var first = true;
+    function args() { return { group: grp.value, kinds: kinds.value, subject_id: subj.value, metric: metric.value }; }
+    async function go() {
+      var a = args(); params = Object.assign({}, a); setParams(params);
+      var D = await GET("/api/reports/analysis", a);
+      if (first) { first = false; subj.appendChild(h("option", { value: "" }, "Все предметы")); D.subjects.forEach(function (s) { subj.appendChild(h("option", { value: s.id }, s.name)); }); subj.value = params.subject_id || ""; }
+      clear(area);
+      if (!D.columns.length || !D.rows.length) { area.appendChild(h("div", { class: "card muted" }, "Нет отметок за периоды для сравнения.")); return; }
+      var m = metric.value;
+      area.appendChild(h("div", { class: "card" }, chart(D, m)));
+      area.appendChild(h("div", { class: "card tw" }, h("table", { class: "t" }, h("thead", null, h("tr", null, h("th", null, ""), D.columns.map(function (c) { return h("th", { class: "n" }, c.label); }))),
+        h("tbody", null, D.rows.map(function (r) {
+          return h("tr", null, h("td", { class: "nm" }, r.name), r.values.map(function (v, i) {
+            var prev = i ? r.values[i - 1][m] : null, cur = v[m];
+            var arrow = prev != null && cur != null ? (cur > prev + 0.001 ? " ▲" : cur < prev - 0.001 ? " ▼" : "") : "";
+            return h("td", { class: "n" + (arrow === " ▲" ? " up" : arrow === " ▼" ? " down" : ""), title: v.n ? "отметок: " + v.n : "" }, cur == null ? "" : String(cur).replace(".", ",") + arrow);
+          }));
+        }))), h("div", { class: "hint" }, "▲/▼ — изменение по сравнению с предыдущим периодом. Качество знаний — доля отметок " + D.kz_min + " и выше.")));
+    }
+    function chart(D, m) {
+      var W = 900, H = 320, L = 46, R = 60, T = 14, B = 90;
+      var cols = D.columns, rows = D.rows.slice(0, 10);
+      var vals = []; rows.forEach(function (r) { r.values.forEach(function (v) { if (v[m] != null) vals.push(v[m]); }); });
+      var lo = m === "avg" ? Math.max(0, Math.floor(Math.min.apply(null, vals)) - 1) : 0, hi = m === "avg" ? Math.min(10, Math.ceil(Math.max.apply(null, vals)) + 1) : 100;
+      var x = function (i) { return L + (cols.length === 1 ? (W - L - R) / 2 : i * (W - L - R) / (cols.length - 1)); };
+      var y = function (v) { return T + (H - T - B) * (1 - (v - lo) / (hi - lo || 1)); };
+      var palette = ["#1f3a68", "#c9862b", "#2e8b57", "#b03a2e", "#6a4c93", "#1b9aaa", "#8d6e63", "#e07a5f", "#3d405b", "#81b29a"];
+      var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" style="max-height:320px" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI,Arial" font-size="11">';
+      for (var g = 0; g <= 4; g++) { var gv = lo + (hi - lo) * g / 4, gy = y(gv); svg += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + gy + '" y2="' + gy + '" stroke="#e3e8ef"/><text x="' + (L - 6) + '" y="' + (gy + 4) + '" text-anchor="end" fill="#667">' + (Math.round(gv * 10) / 10) + '</text>'; }
+      cols.forEach(function (c, i) { svg += '<text transform="translate(' + x(i) + ',' + (H - B + 12) + ') rotate(25)" fill="#556">' + c.label.replace(/&/g, "&amp;") + '</text>'; });
+      rows.forEach(function (r, ri) {
+        var col = palette[ri % palette.length], pts = [];
+        r.values.forEach(function (v, i) { if (v[m] != null) pts.push([x(i), y(v[m])]); });
+        if (pts.length > 1) svg += '<polyline fill="none" stroke="' + col + '" stroke-width="2" points="' + pts.map(function (p) { return p.join(","); }).join(" ") + '"/>';
+        pts.forEach(function (p) { svg += '<circle cx="' + p[0] + '" cy="' + p[1] + '" r="3" fill="' + col + '"/>'; });
+      });
+      svg += "</svg>";
+      var legend = h("div", { class: "legend2" }, rows.map(function (r, ri) { return h("span", null, h("i", { style: { background: palette[ri % palette.length] } }), r.name); }));
+      var box = h("div"); box.innerHTML = svg; box.appendChild(legend);
+      if (D.rows.length > 10) box.appendChild(h("div", { class: "hint" }, "На графике — первые 10 строк; все значения — в таблице."));
+      return box;
+    }
+    safe(go)();
+  };
+
+  // ===================================================================== главная: сегодня по расписанию и замены
+  async function todayCard() {
+    var u = S.me.user;
+    if (!featOn("schedule") || !(u.staff_ids || []).length) return null;
+    var D;
+    try { D = await GET("/api/schedule/day", { staff_id: u.staff_ids[0] }); } catch (e) { return null; }
+    if (!D.schedule && !D.lessons.length) return null;
+    var bells = D.bells || {};
+    return h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Сегодня, " + fmtDate(D.date)),
+      D.lessons.length ? h("div", { class: "subjgrid homegrid" }, D.lessons.map(function (l) {
+        return h("a", { class: "subjcard" + (l.mine_sub ? " subcard" : ""), href: "#/journal?cid=" + l.class_id + "&aid=" + l.assignment_id },
+          h("b", null, l.lesson_no + " урок · " + l.class_name), h("small", null, l.subject + (l.room ? " · каб. " + l.room : "") + (bells[l.lesson_no] ? " · " + bells[l.lesson_no][0] : "")),
+          l.mine_sub ? h("small", { class: "warn" }, "замена за " + l.teacher) : (l.sub_teacher ? h("small", { class: "muted" }, "вас заменяет " + l.sub_teacher) : null));
+      })) : h("div", { class: "muted" }, "Сегодня уроков по расписанию нет."));
+  }
 
   boot();
 })();

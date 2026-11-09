@@ -22,6 +22,10 @@ _MARK = "\x01sg1:"   # префикс зашифрованного значен�
 SENSITIVE = {
     "students": ["personal_no", "address", "phone", "parents", "parents_phone", "social", "note", "extra"],
     "staff": ["phone", "email", "note", "extra", "birth_date", "hire_date"],
+    "parents": ["phone", "work", "note"],
+    "student_social": ["categories", "note"],
+    "characteristics": ["text"],
+    "absence_days": ["note"],
 }
 
 

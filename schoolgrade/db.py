@@ -10,7 +10,7 @@ import sqlite3
 import threading
 import time
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
@@ -120,9 +120,68 @@ CREATE TABLE IF NOT EXISTS lessons (
     assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
     date TEXT NOT NULL, num INTEGER DEFAULT 1,
     topic TEXT DEFAULT '', homework TEXT DEFAULT '', work_type TEXT DEFAULT '',
-    ktp_id INTEGER REFERENCES ktp(id) ON DELETE SET NULL
+    ktp_id INTEGER REFERENCES ktp(id) ON DELETE SET NULL,
+    sub_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_lessons_a ON lessons(assignment_id, date);
+
+-- 1.4: причина пропуска за весь день (вводит классный руководитель)
+CREATE TABLE IF NOT EXISTS absence_days (
+    student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    date TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', note TEXT DEFAULT '',
+    set_by INTEGER, set_at TEXT,
+    PRIMARY KEY(student_id, date)
+);
+
+-- 1.4: расписание (версии с даты; одна или две чередующиеся недели)
+CREATE TABLE IF NOT EXISTS schedules (
+    id INTEGER PRIMARY KEY, year_id INTEGER NOT NULL REFERENCES years(id) ON DELETE CASCADE,
+    name TEXT NOT NULL DEFAULT '', start_date TEXT NOT NULL, weeks INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE IF NOT EXISTS schedule_items (
+    id INTEGER PRIMARY KEY,
+    schedule_id INTEGER NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+    class_id INTEGER NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+    week INTEGER NOT NULL DEFAULT 1, weekday INTEGER NOT NULL, lesson_no INTEGER NOT NULL,
+    assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+    room TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS ix_sched_items ON schedule_items(schedule_id, class_id);
+
+-- 1.4: замены учителей
+CREATE TABLE IF NOT EXISTS substitutions (
+    id INTEGER PRIMARY KEY, date TEXT NOT NULL, lesson_no INTEGER NOT NULL DEFAULT 0,
+    assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+    absent_id INTEGER REFERENCES staff(id) ON DELETE SET NULL,
+    substitute_id INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+    hours REAL NOT NULL DEFAULT 1, reason TEXT DEFAULT '', note TEXT DEFAULT '',
+    created_by INTEGER, created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS ix_subs_date ON substitutions(date);
+
+-- 1.4: кабинет классного руководителя
+CREATE TABLE IF NOT EXISTS parents (
+    id INTEGER PRIMARY KEY, student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    relation TEXT DEFAULT '', fio TEXT DEFAULT '', phone TEXT DEFAULT '', work TEXT DEFAULT '', note TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS student_social (
+    student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    year_id INTEGER NOT NULL REFERENCES years(id) ON DELETE CASCADE,
+    categories TEXT DEFAULT '', note TEXT DEFAULT '',
+    PRIMARY KEY(student_id, year_id)
+);
+CREATE TABLE IF NOT EXISTS characteristics (
+    student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    year_id INTEGER NOT NULL REFERENCES years(id) ON DELETE CASCADE,
+    text TEXT DEFAULT '', updated_by INTEGER, updated_at TEXT,
+    PRIMARY KEY(student_id, year_id)
+);
+CREATE TABLE IF NOT EXISTS activities (
+    id INTEGER PRIMARY KEY, student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    year_id INTEGER NOT NULL REFERENCES years(id) ON DELETE CASCADE,
+    name TEXT NOT NULL DEFAULT '', place TEXT DEFAULT '', leader TEXT DEFAULT '', hours TEXT DEFAULT '', note TEXT DEFAULT ''
+);
 
 CREATE TABLE IF NOT EXISTS ktp (
     id INTEGER PRIMARY KEY,
@@ -135,7 +194,7 @@ CREATE INDEX IF NOT EXISTS ix_ktp_a ON ktp(assignment_id, num);
 CREATE TABLE IF NOT EXISTS marks (
     lesson_id INTEGER NOT NULL REFERENCES lessons(id) ON DELETE CASCADE,
     student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
-    value TEXT NOT NULL, comment TEXT DEFAULT '',
+    value TEXT NOT NULL, comment TEXT DEFAULT '', reason TEXT DEFAULT '',
     updated_by INTEGER, updated_at TEXT,
     PRIMARY KEY(lesson_id, student_id)
 );
@@ -271,6 +330,14 @@ class Database(object):
             if not has_col("ktp", "homework"):
                 self.conn.execute("ALTER TABLE ktp ADD COLUMN homework TEXT DEFAULT ''")
             self.conn.execute("UPDATE meta SET value='4' WHERE key='schema'")
+
+        # --- версия 4 -> 5 (1.4): причины пропусков, замены ---
+        if cur < 5:
+            if not has_col("marks", "reason"):
+                self.conn.execute("ALTER TABLE marks ADD COLUMN reason TEXT DEFAULT ''")
+            if not has_col("lessons", "sub_id"):
+                self.conn.execute("ALTER TABLE lessons ADD COLUMN sub_id INTEGER")
+            self.conn.execute("UPDATE meta SET value='5' WHERE key='schema'")
 
     # ------------------------------------------------------------ helpers
     def q(self, sql, args=()):

@@ -177,6 +177,9 @@ def make_handler(app):
                     raise ApiError(401, "Требуется вход в систему")
                 if user and user.get("must_change") and not public and path not in ("/api/me", "/api/me/password", "/api/logout"):
                     raise ApiError(403, "Необходимо сменить пароль")
+                guard = getattr(app, "guard", None)
+                if guard and path not in ("/api/me", "/api/features"):
+                    guard(path)
                 req = Request(method, path, parse_qs(url.query), body, user, token, ip, self.headers)
                 res = func(req, **params)
                 if isinstance(res, FileResponse):

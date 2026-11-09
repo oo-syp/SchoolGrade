@@ -66,6 +66,7 @@ class App(object):
         self.db, self.data_dir, self.static_dir, self.verbose = db, data_dir, static_dir, verbose
         self.router = router
         self.backup_dir = os.path.join(data_dir, "backup")
+        self.guard = feature_guard
 
 
 APP = {"app": None}
@@ -152,13 +153,64 @@ def locked_date(class_id, date):
                     (y["id"], date, date)) is not None
 
 
-DEFAULT_FEATURES = {"journal": True}
+# Функции, которые администратор может отключить: ключ → (название, раздел).
+# journal — особый режим «только ведомости».
+FEATURE_LIST = [
+    ("journal", "Электронный журнал (уроки, текущие отметки, пропуски)", "Работа"),
+    ("sheet", "Ведомость класса", "Работа"),
+    ("finals", "Отметки по предмету", "Работа"),
+    ("behavior", "Поведение и итоги года", "Работа"),
+    ("cards", "Табели для родителей", "Работа"),
+    ("ktp", "Тематическое планирование (КТП)", "Работа"),
+    ("schedule", "Расписание уроков", "Работа"),
+    ("subs", "Замены учителей", "Работа"),
+    ("clubs", "Журнал факультативов и объединений по интересам", "Работа"),
+    ("classroom", "Кабинет классного руководителя", "Работа"),
+    ("control", "Контроль накопляемости", "Анализ"),
+    ("risk", "Прогноз и группа риска", "Анализ"),
+    ("monitor", "Мониторинг заполнения журнала", "Анализ"),
+    ("analysis", "Сравнительный анализ", "Анализ"),
+    ("reports", "Отчёты и аналитика", "Анализ"),
+    ("department", "Передача данных в отдел образования", "Анализ"),
+    ("startschool", "Импорт из «Старт ШКОЛА»", "Администрирование"),
+    ("schooltest", "Связь с SchoolTest", "Администрирование"),
+]
+DEFAULT_FEATURES = dict((k, True) for k, _n, _g in FEATURE_LIST)
+
+# Запросы, которые закрываются вместе с функцией (страницы закрывает интерфейс)
+FEATURE_PATHS = [
+    (re.compile(r"^/api/sheet/"), "sheet"),
+    (re.compile(r"^/api/finals/\d+$"), "finals"),
+    (re.compile(r"^/api/behavior/\d+$"), "behavior"),
+    (re.compile(r"^/api/classes/\d+/report_cards"), "cards"),
+    (re.compile(r"^/api/(assignments/\d+/ktp|ktp/|reports/ktp_progress)"), "ktp"),
+    (re.compile(r"^/api/schedule"), "schedule"),
+    (re.compile(r"^/api/subs"), "subs"),
+    (re.compile(r"^/api/classroom"), "classroom"),
+    (re.compile(r"^/api/reports/accumulation"), "control"),
+    (re.compile(r"^/api/reports/risk"), "risk"),
+    (re.compile(r"^/api/reports/monitor"), "monitor"),
+    (re.compile(r"^/api/reports/analysis"), "analysis"),
+    (re.compile(r"^/api/(department|export/department)"), "department"),
+    (re.compile(r"^/api/import/startschool"), "startschool"),
+    (re.compile(r"^/api/(schooltest|ext)/"), "schooltest"),
+]
 
 
 def features():
     f = dict(DEFAULT_FEATURES)
     f.update(db().get_setting("features", {}) or {})
     return f
+
+
+def feature_guard(path):
+    """Вызывается сервером перед каждым запросом API."""
+    for rx, key in FEATURE_PATHS:
+        if rx.match(path):
+            if not features().get(key, True):
+                name = dict((k, n) for k, n, _g in FEATURE_LIST)[key]
+                raise ApiError(403, "Функция «%s» отключена администратором" % name)
+            return
 
 
 def need_journal():
@@ -236,6 +288,35 @@ def need_journal_for(a):
         need_journal()
 
 
+# ----- 1.4: причины пропусков и замены -----
+REASONS = {"б": "по болезни", "у": "по уважительной причине", "н": "без уважительной причины"}
+REASON_INPUT = {"нб": "б", "ну": "у", "нн": "н", "н/б": "б", "н/у": "у", "н/н": "н"}
+
+
+def split_absent(value):
+    """«нб» → («н», «б»); «7» → («7», None — причина не меняется)."""
+    v = str(value or "").strip().lower().replace(" ", "")
+    if v in REASON_INPUT:
+        return "н", REASON_INPUT[v]
+    if v in ("н", "n", "y"):
+        return value, ""
+    return value, None
+
+
+def sub_dates(user, aid):
+    """Даты, когда пользователь заменяет учителя по этой нагрузке."""
+    sid = auth.staff_ids(db(), user)
+    if not sid:
+        return set()
+    ph = ",".join("?" * len(sid))
+    return set(r["date"] for r in db().q("SELECT date FROM substitutions WHERE assignment_id=? AND substitute_id IN (%s)" % ph,
+                                         [int(aid)] + list(sid)))
+
+
+def can_edit_on(user, aid, date):
+    return auth.can_edit_assignment(db(), user, aid) or date in sub_dates(user, aid)
+
+
 # ================================================================ auth
 @router.route("POST", "/api/login", public=True)
 def api_login(req):
@@ -264,6 +345,47 @@ def api_about(req):
             "school": (db().get_setting("school", {}) or {}).get("Наименование", "")}
 
 
+RELEASES = {"SchoolGrade": "https://github.com/oo-syp/SchoolGrade/releases/latest",
+            "SchoolTest": "https://github.com/oo-syp/SchoolTest/releases/latest"}
+_UPDATE = {"t": 0, "res": None}
+
+
+def _ver(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v or "")[:3]) or (0,)
+
+
+@router.route("GET", "/api/update_check")
+def api_update_check(req):
+    """Проверка новой версии на GitHub (если есть интернет). Результат кешируется на 6 часов."""
+    if not db().get_setting("update_check", True):
+        return {"enabled": False, "current": APP_VERSION, "url": RELEASES["SchoolGrade"]}
+    if _UPDATE["res"] is None or time.time() - _UPDATE["t"] > 6 * 3600 or req.arg("force"):
+        import urllib.request
+        res = {"enabled": True, "current": APP_VERSION, "url": RELEASES["SchoolGrade"], "latest": None, "error": None}
+        try:
+            rq = urllib.request.Request("https://api.github.com/repos/oo-syp/SchoolGrade/releases/latest",
+                                        headers={"User-Agent": "SchoolGrade/" + APP_VERSION, "Accept": "application/vnd.github+json"})
+            with urllib.request.urlopen(rq, timeout=6) as r:
+                info = json.loads(r.read().decode("utf-8"))
+            res["latest"] = (info.get("tag_name") or "").lstrip("vV")
+            res["name"] = info.get("name") or ""
+            res["published"] = (info.get("published_at") or "")[:10]
+            res["url"] = info.get("html_url") or res["url"]
+        except Exception as e:  # noqa — нет интернета, прокси, нет релизов
+            res["error"] = "Не удалось проверить: нет доступа к GitHub"
+        res["newer"] = bool(res["latest"]) and _ver(res["latest"]) > _ver(APP_VERSION)
+        _UPDATE.update(t=time.time(), res=res)
+    return _UPDATE["res"]
+
+
+@router.route("PUT", "/api/update_check")
+def api_update_check_put(req):
+    need_admin(req)
+    db().set_setting("update_check", bool(req.json().get("enabled")))
+    _UPDATE["res"] = None
+    return {"ok": True}
+
+
 @router.route("GET", "/api/me")
 def api_me(req):
     u = dict(req.user)
@@ -272,11 +394,13 @@ def api_me(req):
     u["can_admin"] = auth.can_admin(u)
     u["can_enter_marks_any"] = auth.can_enter_marks_any(u)
     u["own_classes"] = sorted(auth.own_class_ids(db(), u))
+    u["staff_ids"] = sorted(auth.staff_ids(db(), u) or [])
     years = db().q("SELECT * FROM years ORDER BY start_date DESC")
     cy = current_year()
     return {"user": u, "years": years, "current_year": cy, "rules": R.rules(db()),
             "roles": auth.ROLES, "dicts": DICTS, "school_fields": SCHOOL_FIELDS,
             "school": db().get_setting("school", {}) or {}, "features": features(),
+            "feature_list": [{"key": k, "name": n, "group": g} for k, n, g in FEATURE_LIST],
             "org_type": org_type(), "org_types": [{"code": k, "name": n} for k, n, _ in plans.ORG_TYPES],
             "department_mode": is_department_mode(),
             "hidden_fields": hidden_fields(), "hideable": HIDEABLE,
@@ -344,6 +468,7 @@ def api_features_put(req):
         if k in d:
             f[k] = bool(d[k])
     db().set_setting("features", f)
+    db().set_setting("features_set", True)
     db().audit(req.user, req.ip, "features_updated", f)
     return f
 
@@ -1057,21 +1182,44 @@ def api_assignment_del(req, aid):
 def api_journal(req, aid):
     aid = int(aid)
     a = get_assignment(aid)
-    need(auth.can_view_class(db(), req.user, a["class_id"]))
-    kind = req.arg("period") or "q1"
-    p = db().one("SELECT * FROM periods WHERE year_id=? AND kind=?", (a["year_id"], kind))
+    subs = sub_dates(req.user, aid)
+    need(auth.can_view_class(db(), req.user, a["class_id"]) or subs)
+    month = req.arg("month")
     args = [aid]
     sql = "SELECT * FROM lessons WHERE assignment_id=? "
-    if p and p["start_date"] and p["end_date"]:
-        sql += "AND date>=? AND date<=? "
-        args += [p["start_date"], p["end_date"]]
+    if month:       # журнал ФЗ и ОпИ — по месяцам, включая каникулы
+        need(re.match(r"^\d{4}-\d{2}$", month), "Неверный месяц", 400)
+        p = None
+        sql += "AND substr(date,1,7)=? "
+        args.append(month)
+    else:
+        kind = req.arg("period") or "q1"
+        p = db().one("SELECT * FROM periods WHERE year_id=? AND kind=?", (a["year_id"], kind))
+        if p and p["start_date"] and p["end_date"]:
+            sql += "AND date>=? AND date<=? "
+            args += [p["start_date"], p["end_date"]]
     lessons = db().q(sql + "ORDER BY date, num, id", args)
+    if lessons:
+        subs_info = dict((r["id"], r) for r in db().q(
+            "SELECT s.id, st.last_name, st.first_name, st.middle_name FROM substitutions s LEFT JOIN staff st ON st.id=s.substitute_id "
+            "WHERE s.assignment_id=?", (aid,)))
+        for l in lessons:
+            si = subs_info.get(l.get("sub_id"))
+            l["sub_teacher"] = R.staff_short(si) if si else ""
     studs = R.assignment_students(db(), a)
     lids = [l["id"] for l in lessons]
     marks = {}
     if lids:
-        for m in db().q("SELECT lesson_id, student_id, value, comment FROM marks WHERE lesson_id IN (%s)" % ",".join("?" * len(lids)), lids):
-            marks["%d_%d" % (m["lesson_id"], m["student_id"])] = m["value"]
+        dates = dict((l["id"], l["date"]) for l in lessons)
+        day_reason = dict(((r["student_id"], r["date"]), r["reason"]) for r in db().q(
+            "SELECT student_id, date, reason FROM absence_days WHERE date>=? AND date<=?",
+            (min(dates.values()), max(dates.values()))))
+        for m in db().q("SELECT lesson_id, student_id, value, reason FROM marks WHERE lesson_id IN (%s)" % ",".join("?" * len(lids)), lids):
+            v = m["value"]
+            if v == G.ABSENT:
+                rs = day_reason.get((m["student_id"], dates[m["lesson_id"]])) or m["reason"] or ""
+                v += rs if rs in REASONS else ""
+            marks["%d_%d" % (m["lesson_id"], m["student_id"])] = v
     finals = {}
     for f in db().q("SELECT student_id, kind, value, excused FROM final_marks WHERE assignment_id=?", (aid,)):
         finals["%d_%s" % (f["student_id"], f["kind"])] = {"value": f["value"], "excused": f["excused"]}
@@ -1083,7 +1231,8 @@ def api_journal(req, aid):
         sugg[s["id"]] = G.suggest_period_mark(vals, a["hours"], rl)
     can_edit = auth.can_edit_assignment(db(), req.user, aid)
     periods = db().q("SELECT * FROM periods WHERE year_id=? ORDER BY id", (a["year_id"],))
-    return {"assignment": a, "period": p, "periods": periods, "lessons": lessons,
+    return {"assignment": a, "period": p, "periods": periods, "lessons": lessons, "month": month,
+            "sub_dates": sorted(subs) if not can_edit else [], "reasons": REASONS,
             "students": [{"id": s["id"], "name": R.fio(s), "pe_group": s.get("pe_group", "")} for s in studs],
             "marks": marks, "finals": finals, "suggest": sugg, "can_edit": can_edit,
             "locked": bool(p and p["locked"]) and not auth.can_admin(req.user)}
@@ -1094,9 +1243,9 @@ def api_lesson_create(req, aid):
     aid = int(aid)
     a = get_assignment(aid)
     need_journal_for(a)
-    need(auth.can_edit_assignment(db(), req.user, aid))
     d = req.json()
     date = d.get("date") or time.strftime("%Y-%m-%d")
+    need(can_edit_on(req.user, aid, date), "Нет доступа к журналу на эту дату")
     need(not locked_date(a["class_id"], date) or auth.can_admin(req.user), "Период закрыт для редактирования", 400)
     num = db().val("SELECT COUNT(*) FROM lessons WHERE assignment_id=? AND date=?", (aid, date)) + 1
     topic = d.get("topic", "")
@@ -1111,8 +1260,11 @@ def api_lesson_create(req, aid):
         topic = topic or k["topic"] or ""
         if homework is None:          # не задано в запросе — из КТП
             homework = k["homework"] or ""
+    sub = db().one("SELECT id FROM substitutions WHERE assignment_id=? AND date=? ORDER BY lesson_no LIMIT 1", (aid, date))
     lid = insert("lessons", {"assignment_id": aid, "date": date, "num": num, "topic": topic,
-                             "homework": homework or "", "work_type": d.get("work_type", ""), "ktp_id": kid})
+                             "homework": homework or "", "work_type": d.get("work_type", ""), "ktp_id": kid,
+                             "sub_id": sub["id"] if sub and not auth.can_edit_assignment(db(), req.user, aid) else
+                             (int(d["sub_id"]) if str(d.get("sub_id") or "").isdigit() else None)})
     return {"id": lid}
 
 
@@ -1121,8 +1273,8 @@ def api_lesson_put(req, lid):
     l = db().one("SELECT * FROM lessons WHERE id=?", (int(lid),))
     need(l, "Урок не найден", 404)
     a = get_assignment(l["assignment_id"])
-    need(auth.can_edit_assignment(db(), req.user, a["id"]))
     raw = req.json()
+    need(can_edit_on(req.user, a["id"], l["date"]) and can_edit_on(req.user, a["id"], raw.get("date") or l["date"]))
     d = pick(raw, ["date", "topic", "homework", "work_type"])
     if "ktp_id" in raw:
         d["ktp_id"] = _ktp_item_id(a["id"], raw.get("ktp_id"))
@@ -1137,7 +1289,7 @@ def api_lesson_del(req, lid):
     l = db().one("SELECT * FROM lessons WHERE id=?", (int(lid),))
     need(l, "Урок не найден", 404)
     a = get_assignment(l["assignment_id"])
-    need(auth.can_edit_assignment(db(), req.user, a["id"]))
+    need(can_edit_on(req.user, a["id"], l["date"]))
     need(not locked_date(a["class_id"], l["date"]) or auth.can_admin(req.user), "Период закрыт для редактирования", 400)
     db().ex("DELETE FROM lessons WHERE id=?", (int(lid),))
     db().audit(req.user, req.ip, "lesson_deleted", l)
@@ -1158,25 +1310,34 @@ def api_marks(req):
                 need(l, "Урок не найден", 404)
                 a = get_assignment(l["assignment_id"])
                 need_journal_for(a)
-                need(auth.can_edit_assignment(db(), req.user, a["id"]))
+                need(can_edit_on(req.user, a["id"], l["date"]))
                 need(not locked_date(a["class_id"], l["date"]) or auth.can_admin(req.user), "Период закрыт для редактирования", 400)
                 cache[lid] = a
             a = cache[lid]
+            raw, reason = split_absent(it.get("value"))
             if a.get("is_attend"):
-                v = G.normalize(it.get("value"), "attend")
+                v = G.normalize(raw, "attend")
             else:
-                v = G.normalize(it.get("value"), "current")
+                v = G.normalize(raw, "current")
+            if v != G.ABSENT:
+                reason = ""
             if v and a["eval_type"] == "pass" and G.is_point(v):
                 raise ApiError(400, "По предмету «{}» ведётся зачётная система (зач./незач.)".format(a["subject"]))
             if v and a["eval_type"] == "none" and v != G.ABSENT:
                 raise ApiError(400, "По предмету «{}» отметки не выставляются (только пропуски «н»)".format(a["subject"]))
             if v:
-                db().ex("INSERT INTO marks(lesson_id,student_id,value,updated_by,updated_at) VALUES(?,?,?,?,?) "
-                        "ON CONFLICT(lesson_id,student_id) DO UPDATE SET value=excluded.value, updated_by=excluded.updated_by, updated_at=excluded.updated_at",
-                        (lid, int(it["student_id"]), v, req.user["id"], now()))
+                db().ex("INSERT INTO marks(lesson_id,student_id,value,reason,updated_by,updated_at) VALUES(?,?,?,?,?,?) "
+                        "ON CONFLICT(lesson_id,student_id) DO UPDATE SET value=excluded.value, reason=excluded.reason, "
+                        "updated_by=excluded.updated_by, updated_at=excluded.updated_at",
+                        (lid, int(it["student_id"]), v, reason or "", req.user["id"], now()))
             else:
                 db().ex("DELETE FROM marks WHERE lesson_id=? AND student_id=?", (lid, int(it["student_id"])))
-            saved.append({"lesson_id": lid, "student_id": int(it["student_id"]), "value": v})
+            shown = v
+            if v == G.ABSENT:
+                ld = db().val("SELECT date FROM lessons WHERE id=?", (lid,))
+                dr = db().val("SELECT reason FROM absence_days WHERE student_id=? AND date=?", (int(it["student_id"]), ld))
+                shown = v + ((dr or reason or "") if (dr or reason or "") in REASONS else "")
+            saved.append({"lesson_id": lid, "student_id": int(it["student_id"]), "value": shown})
     if items:
         db().audit(req.user, req.ip, "marks_saved", saved[:50])
     return {"saved": saved}
@@ -2043,6 +2204,9 @@ def _parse_day_list(text, start_year):
     return out
 
 
+ktp_schedule_slots_hook = {"fn": None}   # задаётся модулем расписания (v14)
+
+
 def ktp_schedule(a, d):
     """Слоты уроков по дням недели и пункты КТП по часам → [{date, num, ktp_id, topic, homework}]."""
     import datetime as DT
@@ -2050,7 +2214,8 @@ def ktp_schedule(a, d):
     need(y, "Не найден учебный год класса", 400)
     start_year = int(str(y.get("name") or "2026")[:4])
     days = dict((int(k), max(0, min(8, int(v or 0)))) for k, v in (d.get("days") or {}).items() if str(k).isdigit())
-    need(any(days.values()), "Укажите, в какие дни недели проходят уроки", 400)
+    by_sched = bool(d.get("use_schedule")) and ktp_schedule_slots_hook["fn"]
+    need(by_sched or any(days.values()), "Укажите, в какие дни недели проходят уроки", 400)
     ranges = _study_ranges(y["id"]) if d.get("skip_holidays", True) else []
     try:
         start = DT.date.fromisoformat(d.get("start") or DT.date.today().isoformat())
@@ -2088,7 +2253,7 @@ def ktp_schedule(a, d):
     ui = 0
     while day <= end and ui < len(units):
         iso = day.isoformat()
-        n = days.get(day.isoweekday(), 0)
+        n = len(ktp_schedule_slots_hook["fn"](a, iso)) if by_sched else days.get(day.isoweekday(), 0)
         ok = n and iso not in off and (not ranges or any(r[0] <= iso <= r[1] for r in ranges))
         if ok and mode == "lessons" and locked_date(a["class_id"], iso):
             skipped_locked += 1
@@ -2149,3 +2314,4 @@ def rep_ktp_progress(req):
 
 # ================================================================ связь с SchoolTest
 from . import stlink  # noqa: E402,F401
+from . import v14  # noqa: E402,F401

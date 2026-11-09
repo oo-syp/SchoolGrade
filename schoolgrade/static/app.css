@@ -172,3 +172,35 @@ table.ktp input.ktp-s{min-width:150px}
 table.ktp input.ktp-hw{min-width:200px}
 table.ktp tr.grp td{background:#f1f4f9;font-weight:600;color:var(--navy)}
 table.ktp tr.ktp-next td{background:#fff8e1}
+
+/* карточки на главной */
+.homegrid{grid-template-columns:repeat(auto-fill,minmax(210px,1fr))}
+.homecard{padding:0;gap:0}
+.homecard .hc-main{display:flex;flex-direction:column;gap:3px;padding:10px 12px 6px;color:var(--ink)}
+.homecard .hc-main:hover{text-decoration:none}
+.homecard:hover{border-color:var(--navy2);background:#f7f9fc}
+.homecard .hc-links{display:flex;flex-wrap:wrap;gap:4px 10px;padding:0 12px 9px;font-size:12px}
+
+/* 1.4: расписание, замены, кабинет кл. рук., анализ */
+table.sgrid{table-layout:fixed;min-width:820px}
+table.sgrid th:first-child,table.sgrid td.n{width:58px}
+table.sgrid td.scell{padding:3px 4px;vertical-align:top}
+table.sgrid .srow{display:flex;gap:3px;margin-bottom:2px}
+table.sgrid .srow select{flex:1 1 auto;min-width:0;width:auto;padding:3px 4px;font-size:13px}
+table.sgrid .srow input.room{flex:0 0 44px;width:44px;padding:3px 4px;font-size:13px}
+table.sched td{vertical-align:top;min-width:96px}
+.subcell,tr.subrow td{background:#fff6e0}
+table.tgrid td.n,table.tgrid th.n{padding:2px 3px;font-size:11px;min-width:22px}
+table.tgrid td.conflict{background:#fbd5d0;font-weight:600}
+.bellrow{display:flex;gap:4px;align-items:center;margin:2px 14px 2px 0}
+.bellrow b{width:58px;font-weight:500}
+.bellrow input{width:auto}
+table.social th.vert{writing-mode:vertical-rl;transform:rotate(180deg);font-size:11px;max-height:190px;white-space:normal;font-weight:500;padding:4px 2px}
+table.absgrid td.abs{cursor:pointer;background:#fdecea;font-size:12px}
+table.absgrid td.abs.set{background:#e6f2e6}
+td.up{color:#1f7a3d}td.down{color:#b03a2e}
+.legend2{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12px;margin-top:6px}
+.legend2 i{display:inline-block;width:12px;height:3px;margin-right:5px;vertical-align:middle}
+.subcard{border-color:#e0a63a !important}
+.subjcard small.warn{color:#a8620d}
+.parrow input{width:auto}
