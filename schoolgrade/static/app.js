@@ -275,6 +275,7 @@
       h("aside", { class: "side" },
         h("div", { class: "brand" }, h("img", { src: "icon.svg", alt: "" }), h("div", null, h("b", null, "SchoolGrade"), h("small", null, S.me.school["Наименование"] || "учёт успеваемости"))),
         nav,
+        u.can_manage && !deptMode() ? h("div", { style: { padding: "8px 12px" } }, h("button", { class: "danger", style: { width: "100%" }, onclick: emergencyDialog }, "🚨 Экстренное оповещение")) : null,
         h("div", { class: "who" }, h("div", null, u.full_name || u.login), h("div", null, u.role_name),
           S.me.years.length ? ysel : null,
           h("div", { style: { marginTop: "8px" } }, h("a", { href: "#/password" }, "Сменить пароль"), " · ",
@@ -1807,11 +1808,12 @@
   ROUTES.admin = async function (params) {
     head("Администрирование");
     var tab = params.tab || "users";
-    var tabs = [["users", "Пользователи"], ["features", "Функции программы"], ["rules", "Настройки и правила"], ["fields", "Тип и поля"], ["transfer", "Перенос данных"], ["startschool", "Импорт из «Старт ШКОЛА»"], ["schooltest", "Связь с SchoolTest"], ["backup", "Резервные копии"], ["audit", "Журнал действий"]];
+    var tabs = [["users", "Пользователи"], ["features", "Функции программы"], ["rules", "Настройки и правила"], ["fields", "Тип и поля"], ["transfer", "Перенос данных"], ["startschool", "Импорт из «Старт ШКОЛА»"], ["schooltest", "Связь с SchoolTest"], ["https", "HTTPS и адрес"], ["backup", "Резервные копии"], ["audit", "Журнал действий"]];
     if (deptMode()) tabs = tabs.filter(function (t) { return t[0] !== "startschool"; });
     $main.appendChild(h("div", { class: "tabs" }, tabs.map(function (t) {
       return h("a", { href: "javascript:void 0", class: tab === t[0] ? "on" : "", onclick: function () { params.tab = t[0]; setParams(params); route(); } }, t[1]);
     })));
+    if (tab === "https") { await tabHttps($main); return; }
     if (tab === "users") {
       var users = await GET("/api/users"), staff = await GET("/api/staff");
       var roleOpts = Object.keys(S.me.roles).map(function (k) { return [k, S.me.roles[k]]; });
@@ -2106,25 +2108,32 @@
     head("Расписание уроков", "Версии расписания действуют с указанной даты; поддерживаются чётная и нечётная недели");
     var tab = params.tab || "day";
     var u = S.me.user;
-    var tabs = [["day", "На день"], ["grid", "Сетка класса"], ["teachers", "Учителя"], ["versions", "Версии, звонки, загрузка"]];
+    var tabs = [["day", "На день"], ["grid", "Сетка класса"], ["teachers", "Учителя"], ["versions", "Версии, звонки, загрузка"], ["rooms", "Кабинеты"], ["duty", "Дежурство"]];
+    if (u.can_manage) tabs.push(["asc", "Импорт aSc"], ["kiosk", "Экраны и оповещение"]);
     $main.appendChild(h("div", { class: "tabs" }, tabs.map(function (t) {
       return h("a", { href: "javascript:void 0", class: tab === t[0] ? "on" : "", onclick: function () { location.hash = "#/schedule?tab=" + t[0]; } }, t[1]);
     })));
     var L = await GET("/api/schedule", { year_id: yid() });
     var area = h("div"); $main.appendChild(area);
-    if (!L.versions.length && tab !== "versions") {
+    if (!L.versions.length && ["versions", "rooms", "duty", "asc", "kiosk"].indexOf(tab) < 0) {
       area.appendChild(h("div", { class: "card" }, "Расписание ещё не введено. ", L.can_edit ? h("a", { href: "#/schedule?tab=versions" }, "Создайте первую версию расписания") : "Его вводит администрация."));
       return;
     }
     var bells = L.bells || {};
     var bell = function (n) { var b = bells[n]; return b ? b[0] + "–" + b[1] : ""; };
     var classes = await GET("/api/classes", { year_id: yid() });
+    if (tab === "rooms") { await tabRooms(area, L); return; }
+    if (tab === "duty") { await tabDuty(area, L, classes); return; }
+    if (tab === "asc") { await tabAsc(area, L); return; }
+    if (tab === "kiosk") { await tabKiosk(area, L, classes); return; }
     var vsel = function (val) { return sel(L.versions.map(function (v) { return [v.id, v.name + " (с " + fmtDate(v.start_date) + (v.end_date ? " по " + fmtDate(v.end_date) : "") + (v.weeks === 2 ? ", 2 недели" : "") + ")"]; }), val || L.versions[L.versions.length - 1].id); };
 
     if (tab === "day") {
       var date = h("input", { type: "date", value: params.date || new Date().toISOString().slice(0, 10) });
       var who = sel([["school", "Вся школа"], ["mine", "Мои уроки"]].concat(classes.map(function (c) { return ["c" + c.id, c.name + " класс"]; })), params.who || ((u.staff_ids || []).length ? "mine" : "school"));
       var res = h("div");
+      await dutyBanner(area);
+      if (u.can_manage) await freeRoomsWidget(area);
       area.appendChild(h("div", { class: "bar" }, date, who)); area.appendChild(res);
       var load = safe(async function () {
         params.date = date.value; params.who = who.value; setParams(params);
@@ -2145,7 +2154,7 @@
           res.appendChild(h("div", { class: "card tw" }, h("table", { class: "t sched" },
             h("thead", null, h("tr", null, h("th", null, "Урок"), cls.map(function (c) { return h("th", null, c); }))),
             h("tbody", null, nums.map(function (n) {
-              return h("tr", null, h("td", { class: "n" }, n, h("div", { class: "muted", style: { fontSize: "11px" } }, bell(n))), cls.map(function (c) {
+              return h("tr", null, h("td", { class: "n" }, lessonLabel(bells, n)), cls.map(function (c) {
                 var ls = D.lessons.filter(function (l) { return l.lesson_no === n && l.class_name === c; });
                 return h("td", null, ls.map(function (l) {
                   return h("div", { class: l.sub_teacher ? "subcell" : "" }, h("b", null, l.subject), h("div", { class: "muted", style: { fontSize: "11px" } },
@@ -2156,7 +2165,7 @@
         } else {
           res.appendChild(h("div", { class: "card" }, h("table", { class: "t" }, h("thead", null, h("tr", null, ["Урок", "Время", "Класс", "Предмет", "Учитель", "Каб.", ""].map(function (x) { return h("th", null, x); }))),
             h("tbody", null, D.lessons.map(function (l) {
-              return h("tr", { class: l.sub_teacher ? "subrow" : "" }, h("td", { class: "n" }, l.lesson_no), h("td", null, bell(l.lesson_no)), h("td", null, l.class_name), h("td", null, l.subject),
+              return h("tr", { class: l.sub_teacher ? "subrow" : "" }, h("td", { class: "n" }, l.lesson_no), h("td", null, bell(l.lesson_no) || (l.lesson_no + " урок")), h("td", null, l.class_name), h("td", null, l.subject),
                 h("td", null, l.sub_teacher ? h("span", null, h("s", { class: "muted" }, l.teacher), " → ", h("b", null, l.sub_teacher)) : l.teacher), h("td", null, l.room),
                 h("td", null, journalOn() ? h("a", { href: "#/journal?cid=" + l.class_id + "&aid=" + l.assignment_id }, "журнал") : null));
             })))));
@@ -2180,7 +2189,10 @@
         clear(res2);
         var edit = L.can_edit;
         var opts = [["", "—"]].concat(D.assignments.map(function (a) { return [a.id, (a.short || a.subject) + (a.group_name ? " (" + a.group_name + ")" : "") + (a.category !== "subject" ? (a.category === "fz" ? " · ФЗ" : " · ОпИ") : "")]; }));
-        var maxN = Math.max(7, items.reduce(function (m, x) { return Math.max(m, x.lesson_no); }, 0) + 1);
+        var lastBell = Object.keys(bells).reduce(function (m, k) { return Math.max(m, +k); }, 0);
+        var maxN = Math.min(20, Math.max(7, items.reduce(function (m, x) { return Math.max(m, x.lesson_no); }, 0) + 1, lastBell, +params.rows || 0));
+        var rdl = h("datalist", { id: "rooms-dl" }, (L.classrooms || []).map(function (r) { return h("option", { value: r.short || r.name, label: r.name + " · " + (KIND_NAMES[r.kind] || "") + (r.capacity ? " · " + r.capacity + " мест" : "") }); }));
+        var roomId = function (t) { t = (t || "").trim().toLowerCase(); var f = (L.classrooms || []).filter(function (r) { return r.name.toLowerCase() === t || (r.short || "").toLowerCase() === t; })[0]; return f ? f.id : null; };
         var cellFor = function (wd, n) { return items.filter(function (x) { return x.week === week && x.weekday === wd && x.lesson_no === n; }); };
         var tb = h("tbody");
         var counts = h("div", { class: "hint" });
@@ -2194,7 +2206,7 @@
         for (var n = 0; n <= maxN; n++) {
           (function (n) {
             if (n === 0 && !items.some(function (x) { return x.lesson_no === 0; })) return;
-            tb.appendChild(h("tr", null, h("td", { class: "n" }, n, h("div", { class: "muted", style: { fontSize: "11px" } }, bell(n))), WD.map(function (_d, i) {
+            tb.appendChild(h("tr", null, h("td", { class: "n" }, lessonLabel(bells, n)), WD.map(function (_d, i) {
               var wd = i + 1;
               var cur = cellFor(wd, n);
               var td = h("td", { class: "scell" });
@@ -2203,14 +2215,14 @@
                 cur = cellFor(wd, n);
                 var row = function (it) {
                   var s1 = sel(opts, it ? it.assignment_id : "", { disabled: !edit });
-                  var room = h("input", { value: it ? it.room || "" : "", placeholder: "каб.", class: "room", disabled: !edit });
+                  var room = h("input", { value: it ? it.room || "" : "", placeholder: "каб.", class: "room", list: "rooms-dl", title: "Выберите кабинет из справочника или начните вводить название", disabled: !edit });
                   s1.onchange = function () {
                     if (it && !s1.value) { items.splice(items.indexOf(it), 1); }
                     else if (it) it.assignment_id = +s1.value;
-                    else if (s1.value) items.push({ week: week, weekday: wd, lesson_no: n, assignment_id: +s1.value, room: room.value });
+                    else if (s1.value) items.push({ week: week, weekday: wd, lesson_no: n, assignment_id: +s1.value, room: room.value, room_id: roomId(room.value) });
                     dirty = true; draw(); recount();
                   };
-                  room.oninput = function () { if (it) { it.room = room.value; dirty = true; } };
+                  room.onchange = function () { if (it) { it.room = room.value; it.room_id = roomId(room.value); dirty = true; } };
                   return h("div", { class: "srow" }, s1, room);
                 };
                 cur.forEach(function (it) { td.appendChild(row(it)); });
@@ -2226,6 +2238,8 @@
           })(n);
         }
         var dirty = false;
+        res2.appendChild(rdl);
+        if (maxN < 20) res2.appendChild(h("div", { class: "bar" }, h("button", { onclick: function () { params.rows = maxN + 3; setParams(params); load2(); } }, "Показать больше уроков (до 20)")));
         res2.appendChild(h("div", { class: "card tw" }, h("table", { class: "t sgrid" }, h("thead", null, h("tr", null, h("th", null, "№"), WD.map(function (d) { return h("th", null, d); }))), tb), counts));
         recount();
         if (D.conflicts.length) res2.appendChild(h("div", { class: "card warnbox" }, h("b", null, "Пересечения: учитель в одно время в разных классах"),
@@ -2252,7 +2266,8 @@
         var D = await GET("/api/schedule/" + vs3.value + "/teachers");
         clear(res3);
         var weeks = D.schedule.weeks === 2 ? [1, 2] : [1];
-        var nums = [1, 2, 3, 4, 5, 6, 7, 8];
+        var mxn = 7; D.teachers.forEach(function (t) { Object.keys(t.cells).forEach(function (k) { mxn = Math.max(mxn, +k.split("_")[2]); }); });
+        var nums = []; for (var q = 1; q <= mxn; q++) nums.push(q);
         weeks.forEach(function (w) {
           res3.appendChild(h("div", { class: "card tw" }, weeks.length > 1 ? h("h3", { style: { marginTop: 0 } }, w + "-я неделя") : null,
             h("table", { class: "t tgrid" }, h("thead", null, h("tr", null, h("th", { rowspan: 2 }, "Учитель"), h("th", { rowspan: 2 }, "Ч/нед"), WD.map(function (d) { return h("th", { colspan: nums.length }, d); })),
@@ -2286,10 +2301,11 @@
           [{ text: "Создать", cls: "pri", fn: async function () { var r = await POST("/api/schedule", Object.assign(f.values(), { year_id: yid() })); location.hash = "#/schedule?tab=grid&sid=" + r.id; } }]);
       } }, "+ Новая версия")));
       area.appendChild(card);
-      var bc = h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Звонки"));
+      var bc = h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Звонки"),
+        h("div", { class: "hint" }, "До 20 уроков в день. Неиспользуемые слоты оставьте пустыми. Урок без звонка в сетке показывается как «N урок». " + (L.can_edit ? "" : "Менять звонки могут администратор, директор и завуч.")));
       var binp = {};
       var bt = h("div", { class: "bar" });
-      for (var n = 0; n <= 8; n++) {
+      for (var n = 1; n <= 20; n++) {
         (function (n) {
           var b = bells[n] || ["", ""];
           var s1 = h("input", { type: "time", value: b[0], disabled: !L.can_edit }), s2 = h("input", { type: "time", value: b[1], disabled: !L.can_edit });
@@ -2663,6 +2679,254 @@
           h("b", null, l.lesson_no + " урок · " + l.class_name), h("small", null, l.subject + (l.room ? " · каб. " + l.room : "") + (bells[l.lesson_no] ? " · " + bells[l.lesson_no][0] : "")),
           l.mine_sub ? h("small", { class: "warn" }, "замена за " + l.teacher) : (l.sub_teacher ? h("small", { class: "muted" }, "вас заменяет " + l.sub_teacher) : null));
       })) : h("div", { class: "muted" }, "Сегодня уроков по расписанию нет."));
+  }
+
+  // ===================================================================== 1.5: кабинеты, дежурство, киоски, импорт aSc, HTTPS
+  var KIND_NAMES = { regular: "Обычный", gym: "Спортзал", computer: "Компьютерный класс", hall: "Актовый зал" };
+  function lessonLabel(bells, n) {
+    var b = bells[n];
+    return b ? h("span", null, n, h("div", { class: "muted", style: { fontSize: "11px" } }, b[0] + "–" + b[1])) : (n + " урок");
+  }
+  function addMsg(box, text, cls) { box.appendChild(h("div", { class: cls || "hint" }, text)); }
+
+  async function dutyBanner(area) {
+    var d = await GET("/api/duty/today");
+    if (d.text) area.appendChild(h("div", { class: "card", style: { background: "#fff8e1", borderColor: "#ffd54a", fontWeight: "600" } }, "🧹 " + d.text));
+  }
+
+  // «Свободный кабинет прямо сейчас»
+  async function freeRoomsWidget(area) {
+    var card = h("div", { class: "card" }), body = h("div"), tab = "now";
+    var tabs = h("div", { class: "tabs", style: { marginBottom: "8px" } });
+    function draw(R) {
+      clear(tabs); clear(body);
+      [["now", "Свободны сейчас"], ["next", "Свободны на следующем уроке"]].forEach(function (t) {
+        tabs.appendChild(h("a", { href: "javascript:void 0", class: tab === t[0] ? "on" : "", onclick: function () { tab = t[0]; draw(R); } }, t[1]));
+      });
+      if (!R.has_bells) { addMsg(body, "Звонки не заданы — задайте их на вкладке «Версии, звонки, загрузка».", "warnbox"); return; }
+      if (!R.has_schedule) { addMsg(body, "На эту дату нет действующей версии расписания.", "warnbox"); return; }
+      var S0 = R[tab];
+      if (!S0) { addMsg(body, tab === "now" ? (R.note || "Сейчас уроков нет.") : "Больше уроков по звонкам сегодня нет."); return; }
+      body.appendChild(h("div", { class: "muted", style: { marginBottom: "6px" } }, S0.lesson_no + " урок · " + S0.start + "–" + S0.end + " · время сервера " + R.time));
+      if (!S0.free.length) addMsg(body, "Свободных кабинетов нет.");
+      body.appendChild(h("div", { style: { display: "flex", flexWrap: "wrap", gap: "6px" } }, S0.free.map(function (r) {
+        return h("span", { class: "pill", title: r.kind_name + (r.capacity ? ", мест: " + r.capacity : "") }, h("b", null, r.short || r.name), " · " + r.kind_name + (r.capacity ? " · " + r.capacity + " мест" : ""));
+      })));
+      if (S0.busy.length) body.appendChild(h("details", { style: { marginTop: "6px" } }, h("summary", { class: "muted" }, "Заняты (" + S0.busy.length + ")"),
+        h("div", { class: "muted" }, S0.busy.map(function (r) { return (r.short || r.name) + " — " + r.by; }).join("; "))));
+    }
+    var load = safe(async function () { draw(await GET("/api/rooms/free")); });
+    card.appendChild(h("div", { class: "bar" }, h("h2", { style: { margin: 0 } }, "Свободные кабинеты"), h("span", { class: "sp" }), h("button", { onclick: load }, "Обновить")));
+    card.appendChild(tabs); card.appendChild(body); area.appendChild(card);
+    await load();
+    var iv = setInterval(function () { if (!document.body.contains(card)) clearInterval(iv); else load(); }, 60000);
+  }
+
+  // справочник кабинетов
+  async function tabRooms(area, L) {
+    var D = await GET("/api/classrooms");
+    var kinds = Object.keys(D.kinds).map(function (k) { return [k, D.kinds[k]]; });
+    function dlg(r) {
+      var name = h("input", { value: r ? r.name : "" }), short = h("input", { value: r ? r.short : "", maxlength: 20 }), cap = h("input", { type: "number", min: 0, value: r ? r.capacity : 0 });
+      var kind = sel(kinds, r ? r.kind : "regular"), act = h("input", { type: "checkbox", checked: r ? !!r.active : true });
+      modal(r ? "Кабинет " + r.name : "Новый кабинет", h("div", { class: "form" }, field("Название", name), field("Короткое название (в сетке)", short), field("Вместимость", cap), field("Тип", kind),
+        h("label", { style: { display: "block", margin: "4px 0" } }, act, " Используется")), [{ text: "Сохранить", cls: "pri", fn: async function () {
+          var body = { name: name.value, short: short.value, capacity: +cap.value || 0, kind: kind.value, active: act.checked ? 1 : 0 };
+          if (r) await PUT("/api/classrooms/" + r.id, body); else await POST("/api/classrooms", body);
+          route();
+        } }]);
+    }
+    area.appendChild(h("div", { class: "bar" }, h("h2", { style: { margin: 0 } }, "Кабинеты"), h("span", { class: "sp" }),
+      D.can_edit ? h("button", { class: "pri", onclick: function () { dlg(null); } }, "+ Кабинет") : null));
+    area.appendChild(h("div", { class: "card tw" }, h("table", { class: "t" },
+      h("thead", null, h("tr", null, ["ID", "Название", "Кратко", "Вместимость", "Тип", ""].map(function (x) { return h("th", null, x); }))),
+      h("tbody", null, D.items.length ? D.items.map(function (r) {
+        return h("tr", { class: r.active ? "" : "muted" }, h("td", { class: "n" }, r.id), h("td", null, r.name), h("td", null, r.short), h("td", { class: "n" }, r.capacity || ""), h("td", null, r.kind_name),
+          h("td", null, D.can_edit ? [h("button", { onclick: function () { dlg(r); } }, "Изменить"), " ", h("button", { class: "danger", onclick: safe(async function () {
+            if (!confirmBox("Удалить кабинет «" + r.name + "»? В сетке расписания останется его текстовое название.")) return; await DEL("/api/classrooms/" + r.id); route();
+          }) }, "Удалить")] : null));
+      }) : h("tr", null, h("td", { colspan: 6, class: "muted" }, "Кабинетов пока нет. Добавьте их здесь или загрузите расписание из aSc — кабинеты добавятся автоматически.")))),
+      h("div", { class: "hint" }, "В сетке расписания кабинет выбирается из этого списка (можно набирать название для поиска).")));
+  }
+
+  // дежурство классов
+  async function tabDuty(area, L, classes) {
+    var D = await GET("/api/duty", { year_id: yid() });
+    if (D.today) area.appendChild(h("div", { class: "card", style: { background: "#fff8e1", fontWeight: "600" } }, "🧹 " + D.today));
+    if (D.can_edit) {
+      var cs = sel(classes.map(function (c) { return [c.id, c.name + " класс"]; }), ""), a = h("input", { type: "date", value: new Date().toISOString().slice(0, 10) }), b = h("input", { type: "date" }), pl = h("input", { placeholder: "Локация: 1 этаж, столовая…", style: { minWidth: "220px" } });
+      var week = function () {
+        var d = a.value ? new Date(a.value) : new Date(), wd = (d.getDay() + 6) % 7, m = new Date(d.getTime() - wd * 86400000), s = new Date(m.getTime() + 6 * 86400000);
+        a.value = m.toISOString().slice(0, 10); b.value = s.toISOString().slice(0, 10);
+      };
+      area.appendChild(h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Назначить дежурный класс"),
+        h("div", { class: "bar" }, field("Класс", cs), field("с", a), field("по", b), field("Локация", pl),
+          h("button", { onclick: week, title: "Подставить понедельник–воскресенье недели выбранной даты" }, "На неделю"),
+          h("button", { class: "pri", onclick: safe(async function () {
+            await POST("/api/duty", { class_id: +cs.value, start_date: a.value, end_date: b.value || a.value, place: pl.value }); toast("Дежурство назначено"); route();
+          }) }, "Назначить"))));
+    }
+    area.appendChild(h("div", { class: "card tw" }, h("table", { class: "t" }, h("thead", null, h("tr", null, ["Класс", "Период", "Локация", ""].map(function (x) { return h("th", null, x); }))),
+      h("tbody", null, D.items.length ? D.items.map(function (r) {
+        return h("tr", { class: r.active ? "subrow" : "" }, h("td", null, r.class_name), h("td", null, fmtDate(r.start_date) + (r.end_date !== r.start_date ? " — " + fmtDate(r.end_date) : "")), h("td", null, r.place),
+          h("td", null, r.active ? h("span", { class: "pill" }, "сейчас") : null, D.can_edit ? h("button", { class: "danger", onclick: safe(async function () { await DEL("/api/duty/" + r.id); route(); }) }, "Удалить") : null));
+      }) : h("tr", null, h("td", { colspan: 4, class: "muted" }, "Дежурства не назначены.")))),
+      h("div", { class: "hint" }, "Плашка «Сегодня дежурит: …» показывается в общем расписании и на экране /kiosk/school.")));
+  }
+
+  // экстренное оповещение
+  function emergencyForm(done) {
+    var text = h("textarea", { rows: 3, style: { width: "100%" }, placeholder: "Например: Внимание! Эвакуация. Покиньте здание через ближайший выход." });
+    var bg = h("input", { type: "color", value: "#c62828" }), mins = h("input", { type: "number", min: 1, max: 720, value: 5, style: { width: "80px" } });
+    var presets = h("span", null, [["#c62828", "красный"], ["#ef6c00", "оранжевый"], ["#1565c0", "синий"], ["#2e7d32", "зелёный"], ["#000000", "чёрный"]].map(function (p) {
+      return h("button", { type: "button", style: { background: p[0], color: "#fff", margin: "0 2px" }, onclick: function () { bg.value = p[0]; } }, p[1]);
+    }));
+    var st = h("div", { class: "hint" });
+    GET("/api/alert").then(function (r) { st.textContent = (r.alert ? "Сейчас на экранах: «" + r.alert.text + "». " : "Оповещение не активно. ") + "Подключено экранов: " + r.screens + "."; }).catch(function () {});
+    return h("div", null, field("Текст оповещения", text), h("div", { class: "bar" }, field("Цвет фона", bg), presets, field("Показывать, минут", mins)), st,
+      h("div", { class: "bar" }, h("button", { class: "danger", onclick: safe(async function () {
+        if (!text.value.trim()) { toast("Введите текст", true); return; }
+        if (!confirmBox("Перекрыть расписание на ВСЕХ экранах школы этим сообщением?")) return;
+        var r = await POST("/api/alert", { text: text.value, bg: bg.value, minutes: +mins.value || 5 }); toast("Оповещение отправлено на экранов: " + r.screens); if (done) done();
+      }) }, "Отправить на все экраны"), h("button", { onclick: safe(async function () { await DEL("/api/alert"); toast("Оповещение снято"); if (done) done(); }) }, "Снять оповещение")));
+  }
+  function emergencyDialog() { modal("Экстренное оповещение", emergencyForm(null), []); }
+
+  async function tabKiosk(area, L, classes) {
+    var K = await GET("/api/kiosk"), staff = await GET("/api/staff"), rooms = L.classrooms || [];
+    var base = location.origin;
+    area.appendChild(h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Экстренное оповещение"),
+      h("div", { class: "hint" }, "Сообщение мгновенно перекрывает расписание на всех публичных экранах (технология Server-Sent Events). Экран возвращается к расписанию по окончании времени или по кнопке «Снять»."), emergencyForm(null)));
+    var link = function (path, label) { return h("div", null, h("a", { href: path, target: "_blank" }, label), " ", h("span", { class: "muted" }, base + path)); };
+    var enable = h("input", { type: "checkbox", checked: K.enabled, disabled: !S.me.user.can_admin });
+    enable.onchange = safe(async function () { await PUT("/api/kiosk", { enabled: enable.checked }); toast(enable.checked ? "Экраны включены" : "Экраны отключены"); });
+    area.appendChild(h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Публичные экраны (киоски)"),
+      h("div", { class: "hint" }, "Адреса открываются без пароля — для телевизоров и мониторов в холлах. Данные обновляются каждые 30 секунд (кэш сервера — " + K.ttl + " с). Откройте адрес в браузере на ТВ и включите полноэкранный режим (F11). Лучше использовать адрес по имени компьютера, например " + base + "."),
+      h("label", { style: { display: "block", margin: "4px 0" } }, enable, " Публичные экраны включены (отключить может администратор)"),
+      h("div", null, link("/kiosk/school", "Вся школа")),
+      h("details", null, h("summary", null, "По классам (" + classes.length + ")"), classes.map(function (c) { return link("/kiosk/class/" + c.id, c.name + " класс"); })),
+      h("details", null, h("summary", null, "По учителям"), staff.filter(function (s) { return s.active; }).map(function (s) { return link("/kiosk/teacher/" + s.id, s.short); })),
+      h("details", null, h("summary", null, "По кабинетам"), rooms.length ? rooms.map(function (r) { return link("/kiosk/room/" + r.id, "Кабинет " + r.name); }) : h("div", { class: "muted" }, "Сначала заполните справочник кабинетов."))));
+  }
+
+  // мастер импорта aSc Timetables
+  async function tabAsc(area, L) {
+    var box = h("div"); area.appendChild(box);
+    function step1() {
+      clear(box);
+      box.appendChild(h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Импорт расписания из aSc Timetables (XML)"),
+        h("ol", { class: "muted" }, h("li", null, "В aSc Timetables: «Файл → Экспорт → XML» (формат 2024.24.1 и совместимые)."), h("li", null, "Загрузите файл — программа проверит его и сопоставит классы, учителей, предметы и кабинеты."),
+          h("li", null, "Результат сохраняется как НОВАЯ версия расписания; действующее расписание не изменяется.")),
+        h("button", { class: "pri", onclick: safe(async function () {
+          var fs = await pickFile(".xml"); if (!fs.length) return;
+          var up = await POST("/api/schedule/asc/upload", { filename: fs[0].name, data: await fileToB64(fs[0]) });
+          step2(up);
+        }) }, "Выбрать XML-файл…")));
+    }
+    function step2(up) {
+      clear(box);
+      box.appendChild(h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Шаг 2. Проверка файла"),
+        h("div", null, "Версия формата: " + (up.version || "—") + " · карточек уроков: " + up.counts.cards + " · классов: " + up.counts.classes + ", учителей: " + up.counts.teachers + ", предметов: " + up.counts.subjects + ", кабинетов: " + up.counts.rooms),
+        h("div", null, up.cycle === 2 ? "Расписание на две недели (чётная/нечётная)." : "Расписание на одну неделю."),
+        up.warnings.length ? h("div", { class: "warnbox" }, h("b", null, "Внимание:"), h("ul", null, up.warnings.map(function (w) { return h("li", null, w); }))) : h("div", { class: "pill" }, "Замечаний нет"),
+        h("div", { class: "bar" }, h("button", { onclick: step1 }, "Другой файл"), h("button", { class: "pri", onclick: function () { step3(up); } }, "Далее: сопоставление"))));
+    }
+    function step3(up) {
+      clear(box);
+      var sg = up.sg, maps = { classes: {}, teachers: {}, subjects: {}, rooms: {} };
+      function section(title, key, list, opts, extra) {
+        var unm = list.filter(function (x) { return !x.sg_id && !(key === "rooms"); }).length;
+        return h("div", { class: "card" }, h("h3", { style: { marginTop: 0 } }, title + " (" + list.length + ")", unm ? h("span", { class: "pill warn", style: { marginLeft: "8px" } }, "не найдено: " + unm) : null),
+          h("div", { style: { maxHeight: "300px", overflow: "auto" } }, h("table", { class: "t" }, h("tbody", null, list.map(function (x) {
+            var def = x.sg_id || (key === "rooms" ? "new" : "");
+            var s = sel(opts, def); maps[key][x.asc_id] = s;
+            return h("tr", null, h("td", null, x.name + (x.short && x.short !== x.name ? " (" + x.short + ")" : "")), h("td", null, "→"), h("td", null, s), extra ? h("td", { class: "muted" }, extra(x)) : null);
+          })))));
+      }
+      var optC = [["", "— пропустить —"]].concat(sg.classes.map(function (c) { return [c.id, c.name]; }));
+      var optT = [["", "— не назначать —"]].concat(sg.staff.map(function (c) { return [c.id, c.name]; }));
+      var optS = [["", "— пропустить —"]].concat(sg.subjects.map(function (c) { return [c.id, c.name]; }));
+      var optR = [["", "— без кабинета —"], ["new", "➕ добавить в справочник"]].concat(sg.rooms.map(function (c) { return [c.id, c.name]; }));
+      var nm = h("input", { value: up.name, style: { width: "320px" } }), sd = h("input", { type: "date", value: up.start_date });
+      var ib = h("input", { type: "checkbox", checked: !up.bells_exist }), ar = h("input", { type: "checkbox", checked: true });
+      var shift = h("input", { type: "number", value: 0, min: -5, max: 5, style: { width: "60px" } });
+      var out = h("div");
+      function payload(dry) {
+        var m = {}; Object.keys(maps).forEach(function (k) { m[k] = {}; Object.keys(maps[k]).forEach(function (a) { m[k][a] = maps[k][a].value; }); });
+        return { token: up.token, mapping: m, start_date: sd.value, name: nm.value, import_bells: ib.checked, add_rooms: ar.checked, shift: +shift.value || 0, dry_run: dry };
+      }
+      box.appendChild(h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Шаг 3. Сопоставление"),
+        h("div", { class: "hint" }, "Совпадения найдены автоматически — проверьте и поправьте вручную то, что не найдено. Уроки пропущенных классов и предметов не загружаются.")));
+      box.appendChild(section("Классы", "classes", up.classes, optC));
+      box.appendChild(section("Предметы", "subjects", up.subjects, optS));
+      box.appendChild(section("Учителя", "teachers", up.teachers, optT));
+      box.appendChild(section("Кабинеты", "rooms", up.rooms, optR, function (x) { return KIND_NAMES[x.kind] + (x.capacity ? ", " + x.capacity + " мест" : ""); }));
+      box.appendChild(h("div", { class: "card" }, h("h3", { style: { marginTop: 0 } }, "Новая версия расписания"),
+        h("div", { class: "bar" }, field("Название", nm), field("Действует с", sd)),
+        h("label", { style: { display: "block", margin: "4px 0" } }, ar, " Добавить отсутствующие кабинеты в справочник"),
+        h("label", { style: { display: "block", margin: "4px 0" } }, ib, " Загрузить звонки из aSc (заменит текущие)"),
+        h("label", { class: "f" }, "Сдвиг номеров уроков (если в aSc нулевой урок идёт как «1»): ", shift),
+        out, h("div", { class: "bar" }, h("button", { onclick: step2.bind(null, up) }, "Назад"), h("button", { onclick: safe(async function () {
+          var r = await POST("/api/schedule/asc/apply", payload(true)); clear(out);
+          out.appendChild(h("div", { class: "card" }, h("b", null, "Будет загружено уроков: " + r.items + " (классов: " + r.classes + ")"),
+            r.rooms_new.length ? h("div", null, "Новые кабинеты: " + r.rooms_new.map(function (x) { return x.name; }).join(", ")) : null,
+            r.problems.length ? h("div", { class: r.overflow ? "warnbox" : "hint" }, h("ul", null, r.problems.slice(0, 80).map(function (p) { return h("li", null, p); }))) : h("div", { class: "pill" }, "Замечаний нет")));
+        }) }, "Проверить"), h("button", { class: "pri", onclick: safe(async function () {
+          var r = await POST("/api/schedule/asc/apply", payload(false));
+          clear(box);
+          box.appendChild(h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Готово: версия расписания создана"), h("div", null, "Загружено уроков: " + r.items + ", добавлено кабинетов: " + r.rooms_added),
+            r.problems.length ? h("div", { class: r.overflow ? "warnbox" : "hint" }, h("b", null, "Замечания:"), h("ul", null, r.problems.slice(0, 80).map(function (p) { return h("li", null, p); }))) : null,
+            h("div", { class: "bar" }, h("button", { class: "pri", onclick: function () { location.hash = "#/schedule?tab=grid&sid=" + r.id; } }, "Открыть сетку"), h("button", { onclick: step1 }, "Загрузить ещё"))));
+        }) }, "Создать версию расписания"))));
+    }
+    step1();
+  }
+
+  // HTTPS и адрес программы (Администрирование)
+  async function tabHttps(host) {
+    var D = await GET("/api/https");
+    var box = h("div"); host.appendChild(box);
+    var urls = h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Адрес программы"),
+      h("div", { class: "hint" }, "Сообщите пользователям адрес по имени компьютера — он не меняется при смене IP-адреса."),
+      D.urls.map(function (u, i) { return h("div", { style: { fontFamily: "Consolas, monospace", fontWeight: i === 0 ? "700" : "400" } }, u); }));
+    box.appendChild(urls);
+    var years = sel([["0", "Бессрочный (по умолчанию)"], ["1", "1 год"], ["2", "2 года"], ["5", "5 лет"], ["10", "10 лет"]], "0");
+    var names = h("input", { placeholder: "дополнительные имена через пробел, например journal.school.local", style: { width: "100%" } });
+    var newca = h("input", { type: "checkbox" });
+    var info = D.has_server ? h("div", null,
+      h("div", null, "Корневой сертификат школы: ", h("b", null, D.ca ? D.ca.subject : "—"), D.ca ? " · действует до " + (D.ca.not_after === "unlimited" ? "бессрочно" : D.ca.not_after) : ""),
+      h("div", null, "Сертификат сервера: имена " + D.server.dns.join(", ") + " · до " + (D.server.not_after === "unlimited" ? "бессрочно" : D.server.not_after)),
+      D.server.covers_host ? null : h("div", { class: "warnbox" }, "В сертификате нет имени этого компьютера (" + D.host + ") — выпустите сертификат заново."),
+      D.server.expired ? h("div", { class: "warnbox" }, "Срок действия сертификата истёк.") : null,
+      D.ca ? h("div", { class: "muted", style: { fontFamily: "Consolas, monospace", fontSize: "11px", wordBreak: "break-all" } }, "SHA-256 корневого: " + D.ca.sha256) : null) : h("div", { class: "muted" }, "Сертификат ещё не создан.");
+    var en = h("input", { type: "checkbox", checked: D.enabled, disabled: !D.has_server });
+    en.onchange = safe(async function () { await POST("/api/https/enable", { enabled: en.checked }); toast(en.checked ? "HTTPS включён на порту " + D.port : "HTTPS отключён"); route(); });
+    box.appendChild(h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Сертификат безопасности (HTTPS)"),
+      h("div", { class: "hint" }, "Программа создаёт собственный корневой сертификат школы и сертификат сервера для адреса https://" + D.host.toUpperCase() + ":" + D.port + ". HTTP и HTTPS работают на одном порту одновременно. Тот же комплект можно импортировать в SchoolTest (на этот же или другой сервер школы)."),
+      info,
+      h("div", { class: "bar" }, field("Срок действия", years), h("label", { style: { display: "block", margin: "4px 0" } }, newca, " Создать новый корневой сертификат (потребует повторной установки на всех ПК)")), names,
+      h("div", { class: "bar" }, h("button", { class: "pri", onclick: safe(async function () {
+        if (D.has_ca && newca.checked && !confirmBox("Новый корневой сертификат придётся заново установить на всех компьютерах. Продолжить?")) return;
+        toast("Создание ключей — подождите несколько секунд…");
+        await POST("/api/https/generate", { years: +years.value, names: names.value, new_ca: newca.checked }); toast("Сертификат создан"); route();
+      }) }, D.has_server ? "Перевыпустить сертификат" : "Создать сертификат"),
+        h("label", { style: { display: "block", margin: "4px 0" } }, en, " Включить HTTPS"))));
+    box.appendChild(h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Установка на компьютеры школы"),
+      h("ol", null, h("li", null, "Скачайте корневой сертификат: ", h("a", { href: "/ca.cer" }, "schoolca.cer"), " (или откройте http://" + D.host.toUpperCase() + ":" + D.port + "/ca.cer на нужном ПК)."),
+        h("li", null, "Откройте файл → «Установить сертификат» → «Локальный компьютер» → «Поместить в следующее хранилище» → «Доверенные корневые центры сертификации»."),
+        h("li", null, "Перезапустите браузер и откройте https://" + D.host.toUpperCase() + ":" + D.port + ". Для массовой установки используйте install_ca.bat из комплекта экспорта (от имени администратора) или групповую политику.")),
+      h("div", { class: "hint" }, "Устанавливайте только schoolca.cer. Закрытые ключи (*.key) никому не передавайте.")));
+    box.appendChild(h("div", { class: "card" }, h("h2", { style: { marginTop: 0 } }, "Экспорт и импорт"),
+      h("div", { class: "hint" }, "Комплект (ZIP) подходит для SchoolGrade и SchoolTest: корневой сертификат, сертификат сервера и ключи. При импорте на другой компьютер сертификат сервера автоматически выпускается заново для его имени из того же корневого — на ПК пользователей ничего переустанавливать не нужно. Можно импортировать и собственный сертификат: файлы .crt/.pem + .key."),
+      h("div", { class: "bar" }, h("button", { disabled: !D.has_server, onclick: function () { download("/api/https/export", { keys: 1 }); } }, "Экспорт с ключами (в тайне!)"),
+        h("button", { disabled: !D.has_server, onclick: function () { download("/api/https/export", { keys: 0 }); } }, "Экспорт без ключей"),
+        h("button", { onclick: safe(async function () {
+          var fs = await pickFile(".zip,.crt,.cer,.pem,.key", true); if (!fs.length) return;
+          var files = []; for (var i = 0; i < fs.length; i++) files.push({ name: fs[i].name, data: await fileToB64(fs[i]) });
+          var r = await POST("/api/https/import", { files: files });
+          toast("Сертификат импортирован" + ((r.warnings || []).length ? ". " + r.warnings.join(" ") : "")); route();
+        }) }, "Импорт…"),
+        D.has_server ? h("button", { class: "danger", onclick: safe(async function () { if (!confirmBox("Удалить сертификат с этого компьютера?")) return; await DEL("/api/https"); route(); }) }, "Удалить") : null)));
   }
 
   boot();

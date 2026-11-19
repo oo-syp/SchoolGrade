@@ -10,7 +10,7 @@ import sqlite3
 import threading
 import time
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
@@ -145,7 +145,7 @@ CREATE TABLE IF NOT EXISTS schedule_items (
     class_id INTEGER NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
     week INTEGER NOT NULL DEFAULT 1, weekday INTEGER NOT NULL, lesson_no INTEGER NOT NULL,
     assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
-    room TEXT DEFAULT ''
+    room TEXT DEFAULT '', room_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_sched_items ON schedule_items(schedule_id, class_id);
 
@@ -159,6 +159,22 @@ CREATE TABLE IF NOT EXISTS substitutions (
     created_by INTEGER, created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS ix_subs_date ON substitutions(date);
+
+-- 1.5: справочник кабинетов, дежурство классов, экстренные оповещения
+CREATE TABLE IF NOT EXISTS classrooms (
+    id INTEGER PRIMARY KEY, name TEXT NOT NULL, short TEXT NOT NULL DEFAULT '',
+    capacity INTEGER NOT NULL DEFAULT 0, kind TEXT NOT NULL DEFAULT 'regular',
+    sort INTEGER NOT NULL DEFAULT 100, active INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS duty (
+    id INTEGER PRIMARY KEY, class_id INTEGER NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+    start_date TEXT NOT NULL, end_date TEXT NOT NULL, place TEXT NOT NULL DEFAULT '',
+    created_by INTEGER, created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE IF NOT EXISTS alerts (
+    id INTEGER PRIMARY KEY, text TEXT NOT NULL, bg TEXT NOT NULL DEFAULT '#c62828', fg TEXT NOT NULL DEFAULT '#ffffff',
+    started REAL NOT NULL, until REAL NOT NULL, cancelled INTEGER NOT NULL DEFAULT 0, created_by INTEGER
+);
 
 -- 1.4: кабинет классного руководителя
 CREATE TABLE IF NOT EXISTS parents (
@@ -338,6 +354,18 @@ class Database(object):
             if not has_col("lessons", "sub_id"):
                 self.conn.execute("ALTER TABLE lessons ADD COLUMN sub_id INTEGER")
             self.conn.execute("UPDATE meta SET value='5' WHERE key='schema'")
+        if cur < 6:
+            # 1.5: schedule_items.room_id + перенос текстовых кабинетов в справочник
+            if not has_col("schedule_items", "room_id"):
+                self.conn.execute("ALTER TABLE schedule_items ADD COLUMN room_id INTEGER")
+            names = [r[0] for r in self.conn.execute(
+                "SELECT DISTINCT TRIM(room) FROM schedule_items WHERE room IS NOT NULL AND TRIM(room)<>'' ORDER BY 1")]
+            for i, nm in enumerate(names):
+                row = self.conn.execute("SELECT id FROM classrooms WHERE name=?", (nm,)).fetchone()
+                rid = row[0] if row else self.conn.execute(
+                    "INSERT INTO classrooms(name,short,sort) VALUES(?,?,?)", (nm, nm, (i + 1) * 10)).lastrowid
+                self.conn.execute("UPDATE schedule_items SET room_id=? WHERE TRIM(room)=?", (rid, nm))
+            self.conn.execute("UPDATE meta SET value='6' WHERE key='schema'")
 
     # ------------------------------------------------------------ helpers
     def q(self, sql, args=()):

@@ -15,6 +15,7 @@ from .api import (router, db, need, need_admin, need_school, current_year, year_
 
 WEEKDAYS = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота"]
 WD_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб"]
+MAX_LESSON = 20      # 1.5: до 20 уроков в день (было 8)
 
 
 def _d(s):
@@ -79,7 +80,8 @@ def api_sched_list(req):
     need_school(req)
     y = year_arg(req)
     return {"versions": [_sched_out(s) for s in db().q("SELECT * FROM schedules WHERE year_id=? ORDER BY start_date", (y,))],
-            "bells": db().get_setting("bells", {}) or {}, "can_edit": auth.can_manage(req.user)}
+            "bells": db().get_setting("bells", {}) or {}, "can_edit": auth.can_manage(req.user), "max_lesson": MAX_LESSON,
+            "classrooms": db().q("SELECT * FROM classrooms WHERE active=1 ORDER BY sort, name")}
 
 
 @router.route("POST", "/api/schedule")
@@ -100,23 +102,27 @@ def api_sched_create(req):
                 if weeks == 1 and it["week"] == 2:
                     continue
                 insert("schedule_items", {"schedule_id": sid, "class_id": it["class_id"], "week": it["week"], "weekday": it["weekday"],
-                                          "lesson_no": it["lesson_no"], "assignment_id": it["assignment_id"], "room": it["room"]})
+                                          "lesson_no": it["lesson_no"], "assignment_id": it["assignment_id"], "room": it["room"], "room_id": it["room_id"]})
                 if weeks == 2 and db().one("SELECT weeks FROM schedules WHERE id=?", (int(src),))["weeks"] == 1:
                     insert("schedule_items", {"schedule_id": sid, "class_id": it["class_id"], "week": 2, "weekday": it["weekday"],
-                                              "lesson_no": it["lesson_no"], "assignment_id": it["assignment_id"], "room": it["room"]})
+                                              "lesson_no": it["lesson_no"], "assignment_id": it["assignment_id"], "room": it["room"], "room_id": it["room_id"]})
     db().audit(req.user, req.ip, "schedule_created", {"id": sid, "start": start})
     return {"id": sid}
 
 
 @router.route("PUT", "/api/schedule/bells")
 def api_bells(req):
-    need_manage(req)
+    """Звонки: до 20 уроков. Правят администратор, директор и завуч (роль «Директор / заместитель директора»)."""
+    need(auth.can_manage(req.user), "Звонки могут менять администратор, директор и завуч", 403)
     b = req.json().get("bells") or {}
     clean = {}
     for k, v in b.items():
-        if str(k).isdigit() and isinstance(v, list) and len(v) == 2:
-            clean[str(int(k))] = [str(v[0])[:5], str(v[1])[:5]]
+        if str(k).isdigit() and 0 <= int(k) <= MAX_LESSON and isinstance(v, list) and len(v) == 2:
+            a, e = str(v[0])[:5], str(v[1])[:5]
+            if re.match(r"^\d{1,2}:\d{2}$", a) and re.match(r"^\d{1,2}:\d{2}$", e):
+                clean[str(int(k))] = ["%02d:%s" % (int(a.split(":")[0]), a.split(":")[1]), "%02d:%s" % (int(e.split(":")[0]), e.split(":")[1])]
     db().set_setting("bells", clean)
+    db().audit(req.user, req.ip, "bells_saved", {"slots": len(clean)})
     return clean
 
 
@@ -148,6 +154,22 @@ def api_sched_del(req, sid):
     return {"ok": True}
 
 
+def _resolve_room(it):
+    """Кабинет строки расписания: из справочника (room_id) или введённый текстом (ищем в справочнике по названию)."""
+    rid = it.get("room_id")
+    if rid:
+        r = db().one("SELECT id, short, name FROM classrooms WHERE id=?", (int(rid),))
+        if r:
+            return r["id"], (r["short"] or r["name"])[:20]
+    txt = (it.get("room") or "").strip()[:20]
+    if txt:
+        t = txt.lower()      # lower() в SQLite не понимает кириллицу, сравниваем в Python
+        r = next((x for x in db().q("SELECT id, short, name FROM classrooms") if x["name"].lower() == t or (x["short"] or "").lower() == t), None)
+        if r:
+            return r["id"], (r["short"] or r["name"])[:20]
+    return None, txt
+
+
 def _class_asg(cid):
     out = []
     for a in db().q("SELECT a.id, a.group_name, a.hours, a.teacher_id, sb.name AS subject, sb.short, sb.category, "
@@ -165,7 +187,7 @@ def api_sched_class(req, sid, cid):
     s = db().one("SELECT * FROM schedules WHERE id=?", (int(sid),))
     need(s, "Не найдено", 404)
     return {"schedule": _sched_out(s), "assignments": _class_asg(cid),
-            "items": db().q("SELECT week, weekday, lesson_no, assignment_id, room FROM schedule_items WHERE schedule_id=? AND class_id=?",
+            "items": db().q("SELECT week, weekday, lesson_no, assignment_id, room, room_id FROM schedule_items WHERE schedule_id=? AND class_id=?",
                             (s["id"], int(cid))),
             "conflicts": _conflicts(s["id"], int(cid))}
 
@@ -198,10 +220,11 @@ def api_sched_class_put(req, sid, cid):
         for it in items:
             aid = int(it.get("assignment_id") or 0)
             wd, ln, wk = int(it.get("weekday") or 0), int(it.get("lesson_no") or 0), int(it.get("week") or 1)
-            if aid not in valid or not (1 <= wd <= 6) or not (0 <= ln <= 12) or wk not in (1, 2) or (wk == 2 and s["weeks"] == 1):
+            if aid not in valid or not (1 <= wd <= 6) or not (0 <= ln <= MAX_LESSON) or wk not in (1, 2) or (wk == 2 and s["weeks"] == 1):
                 continue
+            rid, rname = _resolve_room(it)
             insert("schedule_items", {"schedule_id": s["id"], "class_id": int(cid), "week": wk, "weekday": wd, "lesson_no": ln,
-                                      "assignment_id": aid, "room": (it.get("room") or "")[:20]})
+                                      "assignment_id": aid, "room": rname, "room_id": rid})
     db().audit(req.user, req.ip, "schedule_class_saved", {"schedule": s["id"], "class": cid, "items": len(items)})
     return {"ok": True, "conflicts": _conflicts(s["id"], int(cid))}
 
@@ -341,7 +364,7 @@ def api_sched_import(req, sid):
     need(head is not None and cols, "Не найдена строка с названиями классов (например, «5А», «5 «Б»»)", 400)
     first_col = min(cols)
     wd, week = 0, 1
-    items, problems = [], []
+    items, problems, overflow = [], [], set()
     asg_cache = {}
     for r in rows[head + 1:]:
         lead = " ".join(r[:first_col]).lower()
@@ -355,7 +378,7 @@ def api_sched_import(req, sid):
         if not wd or not m:
             continue
         ln = int(m.group(1))
-        if not (0 <= ln <= 12):
+        if not (0 <= ln <= MAX_LESSON):
             continue
         for j, c in cols.items():
             cell = r[j] if j < len(r) else ""
@@ -379,6 +402,8 @@ def api_sched_import(req, sid):
             for it in items:
                 insert("schedule_items", dict(it, schedule_id=s["id"]))
         db().audit(req.user, req.ip, "schedule_imported", {"schedule": s["id"], "items": len(items)})
+    if overflow:
+        problems.insert(0, "Есть уроки с номерами вне сетки 0–%d (%s) — они не загружены." % (MAX_LESSON, ", ".join(map(str, sorted(overflow)))))
     return {"items": len(items), "classes": sorted(set(R.class_name(c) for c in cols.values())), "problems": problems[:200],
             "committed": bool(d.get("commit"))}
 

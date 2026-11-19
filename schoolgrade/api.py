@@ -67,6 +67,10 @@ class App(object):
         self.router = router
         self.backup_dir = os.path.join(data_dir, "backup")
         self.guard = feature_guard
+        from . import v15
+        self.public_get = v15.kiosk_get
+        self.port = 8080
+        self.server = None
 
 
 APP = {"app": None}
@@ -184,7 +188,7 @@ FEATURE_PATHS = [
     (re.compile(r"^/api/behavior/\d+$"), "behavior"),
     (re.compile(r"^/api/classes/\d+/report_cards"), "cards"),
     (re.compile(r"^/api/(assignments/\d+/ktp|ktp/|reports/ktp_progress)"), "ktp"),
-    (re.compile(r"^/api/schedule"), "schedule"),
+    (re.compile(r"^/api/(schedule|classrooms|duty|rooms/|alert|kiosk)"), "schedule"),
     (re.compile(r"^/api/subs"), "subs"),
     (re.compile(r"^/api/classroom"), "classroom"),
     (re.compile(r"^/api/reports/accumulation"), "control"),
@@ -2315,3 +2319,4 @@ def rep_ktp_progress(req):
 # ================================================================ связь с SchoolTest
 from . import stlink  # noqa: E402,F401
 from . import v14  # noqa: E402,F401
+from . import v15  # noqa: E402,F401

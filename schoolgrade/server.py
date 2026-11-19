@@ -5,6 +5,7 @@ import mimetypes
 import os
 import re
 import socket
+import ssl
 import sys
 import threading
 import traceback
@@ -80,8 +81,39 @@ class Router(object):
 
 
 class ThreadingServer(ThreadingMixIn, HTTPServer):
+    """HTTP и HTTPS на одном порту: по первому байту соединения (0x16 — рукопожатие TLS)
+    определяется протокол, поэтому http://ПК:8080 и https://ПК:8080 работают одновременно."""
     daemon_threads = True
     allow_reuse_address = True
+    ssl_context = None       # SSLContext с сертификатом школы (или None)
+    https_enabled = False
+
+    def finish_request(self, request, client_address):
+        try:
+            request.settimeout(15)
+            first = request.recv(1, socket.MSG_PEEK)
+        except OSError:
+            return
+        if not first:
+            return
+        wrapped = None
+        if first == b"\x16":
+            ctx = self.ssl_context
+            if not ctx or not self.https_enabled:
+                return
+            try:
+                request = wrapped = ctx.wrap_socket(request, server_side=True)
+            except (ssl.SSLError, OSError):
+                return          # браузер отверг сертификат / обрыв — обычная ситуация
+        try:
+            request.settimeout(None)
+            self.RequestHandlerClass(request, client_address, self)
+        finally:
+            if wrapped is not None:
+                try:
+                    wrapped.close()
+                except OSError:
+                    pass
 
 
 def make_handler(app):
@@ -158,6 +190,9 @@ def make_handler(app):
             if not path.startswith("/api/"):
                 if method != "GET":
                     return self._send(405, "Method not allowed", "text/plain")
+                pub = getattr(app, "public_get", None)      # киоски (/kiosk/...), корневой сертификат (/ca.cer)
+                if pub and (path.startswith("/kiosk") or path in ("/ca.cer", "/ca.crt")):
+                    return pub(self, path, url.query)
                 return self._static(path)
             try:
                 length = int(self.headers.get("Content-Length") or 0)
@@ -223,6 +258,13 @@ class ServerThread(threading.Thread):
         threading.Thread.__init__(self)
         self.daemon = True
         self.httpd = ThreadingServer((host, port), make_handler(app))
+        self.app = app
+        app.server = self
+
+    def set_tls(self, ctx, enabled):
+        """Подключить/отключить HTTPS без перезапуска сервера."""
+        self.httpd.ssl_context = ctx
+        self.httpd.https_enabled = bool(enabled and ctx)
 
     def run(self):
         self.httpd.serve_forever(poll_interval=0.5)

@@ -187,7 +187,7 @@ table.sgrid th:first-child,table.sgrid td.n{width:58px}
 table.sgrid td.scell{padding:3px 4px;vertical-align:top}
 table.sgrid .srow{display:flex;gap:3px;margin-bottom:2px}
 table.sgrid .srow select{flex:1 1 auto;min-width:0;width:auto;padding:3px 4px;font-size:13px}
-table.sgrid .srow input.room{flex:0 0 44px;width:44px;padding:3px 4px;font-size:13px}
+table.sgrid .srow input.room{flex:0 0 60px;width:60px;padding:3px 4px;font-size:13px}
 table.sched td{vertical-align:top;min-width:96px}
 .subcell,tr.subrow td{background:#fff6e0}
 table.tgrid td.n,table.tgrid th.n{padding:2px 3px;font-size:11px;min-width:22px}
