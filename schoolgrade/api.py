@@ -1102,7 +1102,9 @@ def api_assignments(req):
         r["teacher"] = R.teacher_of(r)
         if "grade" in r:
             r["class_name"] = R.class_name(r)
-        r["n_sub"] = db().val("SELECT COUNT(*) FROM assignment_students WHERE assignment_id=?", (r["id"],))
+        ids = [x["student_id"] for x in db().q("SELECT student_id FROM assignment_students WHERE assignment_id=?", (r["id"],))]
+        r["n_sub"] = len(ids)
+        r["student_ids"] = ids          # 1.5.1: состав подгруппы (для отметки галочек при повторном редактировании)
     return rows
 
 
@@ -1169,6 +1171,44 @@ def api_assignment_put(req, aid):
             for sid in d["student_ids"] or []:
                 db().ex("INSERT INTO assignment_students(assignment_id,student_id) VALUES(?,?)", (int(aid), int(sid)))
     return {"ok": True}
+
+
+@router.route("POST", "/api/assignments/:aid/split")
+def api_assignment_split(req, aid):
+    """1.5.1: разделить предмет класса на подгруппы за одно действие.
+    Первая подгруппа сохраняет существующую нагрузку (и уроки журнала), остальные создаются заново."""
+    need_manage(req)
+    a = db().one("SELECT * FROM assignments WHERE id=?", (int(aid),))
+    need(a, "Не найдено", 404)
+    groups = (req.json().get("groups") or [])
+    need(2 <= len(groups) <= 6, "Подгрупп должно быть от 2 до 6", 400)
+    class_ids = set(s["id"] for s in R.class_students(db(), a["class_id"]))
+    seen = set()
+    for g in groups:
+        need((g.get("name") or "").strip(), "Укажите название каждой подгруппы", 400)
+        ids = set(int(x) for x in g.get("student_ids") or [])
+        need(ids, "В подгруппе «%s» нет учащихся" % g["name"], 400)
+        need(ids <= class_ids, "В составе есть учащиеся не из этого класса", 400)
+        need(not (ids & seen), "Один учащийся указан в двух подгруппах", 400)
+        seen |= ids
+    need(seen == class_ids, "Распределены не все учащиеся: не хватает %d" % len(class_ids - seen), 400)
+    need(len(set(g["name"].strip().lower() for g in groups)) == len(groups), "Названия подгрупп должны различаться", 400)
+    out = []
+    with db().tx():
+        for i, g in enumerate(groups):
+            tid = g.get("teacher_id") or None
+            if i == 0:
+                update("assignments", a["id"], {"group_name": g["name"].strip()[:60], "teacher_id": tid})
+                cur = a["id"]
+            else:
+                cur = insert("assignments", {"class_id": a["class_id"], "subject_id": a["subject_id"], "teacher_id": tid,
+                                             "group_name": g["name"].strip()[:60], "hours": a["hours"], "eval_type": a["eval_type"]})
+            db().ex("DELETE FROM assignment_students WHERE assignment_id=?", (cur,))
+            for sid in g["student_ids"]:
+                db().ex("INSERT INTO assignment_students(assignment_id,student_id) VALUES(?,?)", (cur, int(sid)))
+            out.append(cur)
+    db().audit(req.user, req.ip, "assignment_split", {"assignment": a["id"], "groups": len(groups)})
+    return {"ids": out, "lessons_in_first": db().val("SELECT COUNT(*) FROM lessons WHERE assignment_id=?", (a["id"],))}
 
 
 @router.route("DELETE", "/api/assignments/:aid")
@@ -2217,7 +2257,7 @@ def ktp_schedule(a, d):
     y = R.year_of_class(db(), a["class_id"])
     need(y, "Не найден учебный год класса", 400)
     start_year = int(str(y.get("name") or "2026")[:4])
-    days = dict((int(k), max(0, min(8, int(v or 0)))) for k, v in (d.get("days") or {}).items() if str(k).isdigit())
+    days = dict((int(k), max(0, min(20, int(v or 0)))) for k, v in (d.get("days") or {}).items() if str(k).isdigit())
     by_sched = bool(d.get("use_schedule")) and ktp_schedule_slots_hook["fn"]
     need(by_sched or any(days.values()), "Укажите, в какие дни недели проходят уроки", 400)
     ranges = _study_ranges(y["id"]) if d.get("skip_holidays", True) else []
@@ -2272,8 +2312,24 @@ def ktp_schedule(a, d):
                 out.append({"date": iso, "num": slot + 1, "ktp_id": it["id"], "topic": it["topic"],
                             "homework": it.get("homework") or "", "item_num": it["num"]})
         day += DT.timedelta(days=1)
+    hint = ""
+    if not out and units:
+        if by_sched:
+            first_sched = db().val("SELECT MIN(s.start_date) FROM schedule_items si JOIN schedules s ON s.id=si.schedule_id "
+                                   "WHERE si.assignment_id=?", (a["id"],))
+            if not first_sched:
+                hint = ("В расписании нет ни одного урока по этой нагрузке. Поставьте её в сетку класса (Расписание → «Сетка класса») "
+                        "или уберите галочку «По расписанию уроков» и укажите дни недели вручную.")
+            elif first_sched > end.isoformat():
+                hint = "Расписание по этой нагрузке действует с %s — раньше уроков нет. Измените дату начала версии расписания (Расписание → «Версии» → «Изменить») или период." % first_sched
+            else:
+                hint = "В выбранном периоде по расписанию нет подходящих дней."
+        if ranges and not hint and not any(r[0] <= end.isoformat() and r[1] >= start.isoformat() for r in ranges):
+            hint = "Выбранный период не попадает в учебные четверти. Проверьте даты четвертей (Учебный год)."
+        if skipped_locked and not hint:
+            hint = "Все дни периода относятся к закрытым периодам — откройте период в «Учебном годе»."
     return {"slots": out, "left": len(units) - ui, "units": len(units), "skipped_locked": skipped_locked,
-            "end": end.isoformat()}
+            "end": end.isoformat(), "hint": hint}
 
 
 @router.route("POST", "/api/assignments/:aid/ktp/schedule")

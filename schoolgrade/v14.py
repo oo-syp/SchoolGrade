@@ -137,6 +137,8 @@ def api_sched_put(req, sid):
         upd["name"] = (d["name"] or "").strip()[:100]
     if d.get("start_date"):
         upd["start_date"] = _d(d["start_date"]).isoformat()
+        need(not db().val("SELECT 1 FROM schedules WHERE year_id=? AND start_date=? AND id<>?", (s["year_id"], upd["start_date"], s["id"])),
+             "Версия расписания с такой датой уже есть", 400)
     if "weeks" in d:
         upd["weeks"] = 2 if int(d["weeks"] or 1) == 2 else 1
         if upd["weeks"] == 1:

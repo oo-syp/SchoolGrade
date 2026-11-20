@@ -204,3 +204,10 @@ td.up{color:#1f7a3d}td.down{color:#b03a2e}
 .subcard{border-color:#e0a63a !important}
 .subjcard small.warn{color:#a8620d}
 .parrow input{width:auto}
+
+.help .card{margin-bottom:12px}
+.help h3{margin:0 0 8px}
+.help p,.help li{line-height:1.55;max-width:900px}
+.help ol,.help ul{padding-left:22px;margin:6px 0 10px}
+.help-note{background:#eef5ff;border-left:3px solid var(--navy);padding:8px 12px;margin:8px 0;border-radius:4px;max-width:900px}
+.help-toc a{cursor:pointer}

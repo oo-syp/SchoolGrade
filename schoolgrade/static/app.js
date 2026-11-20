@@ -244,10 +244,12 @@
       ["#/reports", "Отчёты и аналитика", null, "reports"], ["#/department", "Передать в отдел образования", "all", "department"]]],
     ["Данные", [["#/classes", "Классы и нагрузка"], ["#/students", "Учащиеся"], ["#/staff", "Сотрудники", "manage"], ["#/subjects", "Предметы", "manage"]]],
     ["Учреждение", [["#/school", "Паспорт учреждения"], ["#/years", "Учебный год", "manage"], ["#/admin", "Администрирование", "admin"], ["#/about", "О программе"]]],
+    ["Справка", [["#/help", "Как пользоваться"]]],
   ];
   var NAV_DEPT = [
     ["Отдел образования", [["#/", "Главная"], ["#/department", "Свод по учреждениям"]]],
     ["Настройки", [["#/school", "Сведения об отделе", "manage"], ["#/admin", "Администрирование", "admin"], ["#/about", "О программе"]]],
+    ["Справка", [["#/help", "Как пользоваться"]]],
   ];
   var $main;
   function renderShell() {
@@ -278,7 +280,7 @@
         u.can_manage && !deptMode() ? h("div", { style: { padding: "8px 12px" } }, h("button", { class: "danger", style: { width: "100%" }, onclick: emergencyDialog }, "🚨 Экстренное оповещение")) : null,
         h("div", { class: "who" }, h("div", null, u.full_name || u.login), h("div", null, u.role_name),
           S.me.years.length ? ysel : null,
-          h("div", { style: { marginTop: "8px" } }, h("a", { href: "#/password" }, "Сменить пароль"), " · ",
+          h("div", { style: { marginTop: "8px" } }, h("a", { href: "#/help", style: { fontWeight: "600" } }, "❓ Как пользоваться"), h("br"), h("a", { href: "#/password" }, "Сменить пароль"), " · ",
             h("a", { href: "javascript:void 0", onclick: safe(async function () { await POST("/api/logout"); S.me = null; renderLogin(); }) }, "Выход")))),
       $main));
   }
@@ -307,7 +309,7 @@
       $main.appendChild(h("div", { class: "card" }, "Эта функция отключена администратором учреждения. Включить её можно в разделе «Администрирование → Функции программы»."));
       return;
     }
-    if (!deptMode() && !S.year && ["", "about", "years", "school", "admin", "subjects", "staff"].indexOf(name) < 0) {
+    if (!deptMode() && !S.year && ["", "about", "help", "years", "school", "admin", "subjects", "staff"].indexOf(name) < 0) {
       $main.appendChild(h("div", { class: "card" }, h("h2", null, "Учебный год не создан"),
         S.me.user.can_manage ? h("a", { href: "#/years" }, "Создайте учебный год") : "Обратитесь к администратору."));
       return;
@@ -590,13 +592,13 @@
       var names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
       var dayInp = {};
       var daysRow = h("div", { class: "bar" }, names.map(function (n, i) {
-        var e = h("input", { type: "number", min: 0, max: 8, value: String((saved.days || {})[i + 1] || 0), style: { width: "56px" } });
+        var e = h("input", { type: "number", min: 0, max: 20, value: String((saved.days || {})[i + 1] || 0), style: { width: "56px" } });
         dayInp[i + 1] = e;
         return h("label", { style: { display: "flex", flexDirection: "column", alignItems: "center", gap: "2px" } }, h("b", null, n), e);
       }));
       var today = new Date().toISOString().slice(0, 10);
       var first = items.filter(function (x) { return x.planned_date; })[0];
-      var start = h("input", { type: "date", value: lessons ? (saved.start && saved.start > today ? saved.start : today) : (saved.start || (first ? first.planned_date : "") || today) });
+      var start = h("input", { type: "date", value: lessons ? ((items.some(function (x) { return x.done && x.done.length; }) ? today : yearStart()) || today) : (saved.start || (first ? first.planned_date : "") || today) });
       var end = h("input", { type: "date", value: saved.end || "" });
       var hol = h("input", { type: "text", value: saved.holidays || "01.01, 02.01, 07.01, 08.03, 01.05, 09.05, 03.07, 07.11, 25.12", style: { width: "100%" } });
       var skip = h("input", { type: "checkbox", checked: saved.skip_holidays !== false });
@@ -618,6 +620,7 @@
       var preview = safe(async function () {
         var r = await POST("/api/assignments/" + params.aid + "/ktp/schedule", Object.assign(vals(), { dry_run: true }));
         clear(prev);
+        if (r.hint) prev.appendChild(h("div", { class: "warnbox" }, r.hint));
         prev.appendChild(h("p", null, (lessons ? "Будет создано уроков: " : "Получат даты уроков: ") + r.slots.length +
           (r.left ? ". Не хватило дат для " + r.left + " ч КТП — увеличьте период или число уроков в неделю." : ".") +
           (r.skipped_locked ? " Пропущено дней в закрытом периоде: " + r.skipped_locked + "." : "")));
@@ -640,8 +643,8 @@
       syncDays();
       modal(lessons ? "Создать уроки в журнале по КТП" : "Расставить даты в КТП", body, [{ text: lessons ? "Создать уроки" : "Расставить даты", cls: "pri", fn: async function () {
         var v = vals();
-        var r = await POST("/api/assignments/" + params.aid + "/ktp/schedule", Object.assign(v, { dry_run: true }));
-        if (!r.slots.length) { toast("Нет подходящих дат", true); return false; }
+        var r = await POST("/api/assignments/" + params.aid + "/ktp/schedule", Object.assign({}, v, { dry_run: true }));
+        if (!r.slots.length) { toast(r.hint || "Нет подходящих дат", true); return false; }
         if (lessons && !confirmBox("Создать в журнале " + r.slots.length + " уроков с " + fmtDate(r.slots[0].date) + " по " + fmtDate(r.slots[r.slots.length - 1].date) + "?")) return false;
         var res = await POST("/api/assignments/" + params.aid + "/ktp/schedule", v);
         toast(lessons ? "Создано уроков: " + res.created : "Даты расставлены: " + res.created + " уроков");
@@ -1427,25 +1430,97 @@
       var rows2 = asg.map(function (a) {
         return h("tr", null, h("td", null, a.subject + (a.category && a.category !== "subject" ? " [" + (a.category === "fz" ? "ФЗ" : "ОпИ") + "]" : "")), h("td", null, a.group_name || ""), h("td", null, a.teacher || "—"), h("td", { class: "n" }, a.hours),
           h("td", null, evName[a.eval_type] || a.eval_type), h("td", { class: "n" }, a.n_sub ? a.n_sub + " уч-ся" : "весь класс"),
-          h("td", null, journalOn() ? h("a", { href: "#/journal?aid=" + a.id }, "журнал") : h("a", { href: "#/finals?aid=" + a.id }, "отметки"), " ", u.can_manage ? h("button", { class: "sm", onclick: function () { asgDialog(a); } }, "изменить") : null));
+          h("td", null, journalOn() ? h("a", { href: "#/journal?aid=" + a.id }, "журнал") : h("a", { href: "#/finals?aid=" + a.id }, "отметки"), " ", u.can_manage ? h("button", { class: "sm", onclick: function () { asgDialog(a); } }, "изменить") : null, " ", u.can_manage && !a.n_sub && a.category === "subject" ? h("button", { class: "sm", title: "Разделить предмет на подгруппы (английский, труд, информатика…)", onclick: function () { splitDialog(a); } }, "на подгруппы") : null));
       });
       area.appendChild(h("div", { class: "tw" }, h("table", { class: "t" }, h("thead", null, h("tr", null, ["Предмет", "Группа", "Учитель", "Ч/нед", "Оценивание", "Состав", ""].map(function (x) { return h("th", null, x); }))), h("tbody", null, rows2))));
       var asgDialog = safe(async function (a) {
         var studs = await GET("/api/classes/" + c.id + "/students");
-        var curSub = []; // состав подгруппы
+        var mine = {}; (a.student_ids || []).forEach(function (i) { mine[i] = true; });
         var t = sel(staffOpts, a.teacher_id), hr = h("input", { type: "number", value: a.hours, step: 0.5 }), ev = sel([["points", "10 баллов"], ["pass", "зачёт"], ["none", "без отметок"]], a.eval_type), gr = h("input", { value: a.group_name || "" });
-        var box = h("div", { style: { columns: "2" } }, studs.map(function (s) { return h("label", { style: { display: "block" } }, h("input", { type: "checkbox", value: s.id }), " " + s.last_name + " " + s.first_name); }));
+        var cnt = h("span", { class: "muted" });
+        var boxes = studs.map(function (s) { return h("input", { type: "checkbox", value: s.id, checked: !!mine[s.id] }); });
+        var upd = function () { var n = boxes.filter(function (b) { return b.checked; }).length; cnt.textContent = n ? "Отмечено: " + n + " из " + studs.length : "Не отмечено никого — предмет ведётся для всего класса"; };
+        boxes.forEach(function (b) { b.onchange = upd; });
+        var setAll = function (fn) { studs.forEach(function (s, i) { boxes[i].checked = fn(s, i); }); upd(); };
+        var box = h("div", { style: { columns: "2" } }, studs.map(function (s, i) { return h("label", { style: { display: "block" } }, boxes[i], " " + s.last_name + " " + s.first_name); }));
+        // «взять состав из другой подгруппы» этого класса
+        var others = asg.filter(function (x) { return x.id !== a.id && x.n_sub; });
+        var from = others.length ? sel([["", "— взять состав из… —"]].concat(others.map(function (x) { return [x.id, x.subject + " (" + (x.group_name || "подгруппа") + ")"]; })), "") : null;
+        if (from) from.onchange = function () {
+          var o = others.filter(function (x) { return String(x.id) === from.value; })[0]; if (!o) return;
+          var m = {}; o.student_ids.forEach(function (i) { m[i] = true; }); setAll(function (s) { return !!m[s.id]; });
+        };
+        var tools = h("div", { class: "bar" }, h("button", { type: "button", onclick: function () { setAll(function () { return true; }); } }, "Весь класс"),
+          h("button", { type: "button", onclick: function () { setAll(function () { return false; }); } }, "Снять все"),
+          h("button", { type: "button", onclick: function () { setAll(function (s, i) { return !boxes[i].checked; }); } }, "Обратить выбор"),
+          h("button", { type: "button", onclick: function () { setAll(function (s) { return s.gender === "м"; }); } }, "Мальчики"),
+          h("button", { type: "button", onclick: function () { setAll(function (s) { return s.gender === "ж"; }); } }, "Девочки"), from, cnt);
+        upd();
         modal(c.name + " · " + a.subject, h("div", null, h("div", { class: "form" }, field("Учитель", t), field("Часов в неделю", hr), field("Система оценивания", ev), field("Группа (подгруппа)", gr)),
-          h("h3", null, "Состав группы (если не отмечено никого — весь класс)"), box),
+          h("h3", null, "Состав группы (если не отмечено никого — весь класс)"), tools, box),
           [{ text: "Сохранить", cls: "pri", fn: async function () {
-            var ids = Array.prototype.map.call(box.querySelectorAll("input:checked"), function (i) { return i.value; });
+            var ids = boxes.filter(function (b) { return b.checked; }).map(function (b) { return b.value; });
             await PUT("/api/assignments/" + a.id, { teacher_id: t.value, hours: hr.value, eval_type: ev.value, group_name: gr.value, student_ids: (ids.length || a.n_sub) ? ids : undefined }); route();
           } }, { text: "Удалить", cls: "danger", fn: async function () {
             try { await DEL("/api/assignments/" + a.id); }
             catch (e) { if (e.status === 409 && confirmBox(e.message + " Удалить всё равно?")) await api("DELETE", "/api/assignments/" + a.id + "?force=1"); else throw e; }
             route();
           } }]);
-        curSub = curSub;
+      });
+      // «Разделить на подгруппы»: все подгруппы предмета за одно действие
+      var splitDialog = safe(async function (a) {
+        var studs = (await GET("/api/classes/" + c.id + "/students")).slice().sort(function (x, y) { return (x.last_name + x.first_name) < (y.last_name + y.first_name) ? -1 : 1; });
+        var N = 2, names = [], teach = [], pick = {}; // pick[studentId] = индекс подгруппы
+        studs.forEach(function (s, i) { pick[s.id] = i < studs.length / 2 ? 0 : 1; });
+        var host = h("div");
+        var others = asg.filter(function (x) { return x.id !== a.id && x.n_sub && x.subject_id !== a.subject_id; });
+        var bySubject = {}; others.forEach(function (x) { (bySubject[x.subject] = bySubject[x.subject] || []).push(x); });
+        function draw() {
+          clear(host);
+          var nsel = sel([[2, "2 подгруппы"], [3, "3 подгруппы"], [4, "4 подгруппы"]], N);
+          nsel.onchange = function () { N = +nsel.value; studs.forEach(function (s) { if (pick[s.id] >= N) pick[s.id] = N - 1; }); draw(); };
+          host.appendChild(h("div", { class: "bar" }, field("Сколько подгрупп", nsel)));
+          var cols = [];
+          for (var g = 0; g < N; g++) (function (g) {
+            names[g] = names[g] || (g + 1) + " подгруппа";
+            var ni = h("input", { value: names[g] }); ni.oninput = function () { names[g] = ni.value; };
+            var ti = sel(staffOpts, teach[g] !== undefined ? teach[g] : (g === 0 ? a.teacher_id : "")); ti.onchange = function () { teach[g] = ti.value; };
+            cols.push(h("div", { class: "form" }, field("Название", ni), field("Учитель", ti), h("div", { class: "muted", id: "sg-cnt-" + g })));
+          })(g);
+          host.appendChild(h("div", null, cols));
+          var quick = h("div", { class: "bar" }, h("b", null, "Распределить:"),
+            h("button", { type: "button", onclick: function () { studs.forEach(function (s, i) { pick[s.id] = Math.min(N - 1, Math.floor(i * N / studs.length)); }); draw(); } }, "поровну по алфавиту"),
+            h("button", { type: "button", onclick: function () { studs.forEach(function (s, i) { pick[s.id] = i % N; }); draw(); } }, "по очереди"),
+            N === 2 ? h("button", { type: "button", onclick: function () { studs.forEach(function (s) { pick[s.id] = s.gender === "ж" ? 1 : 0; }); names[0] = "Мальчики"; names[1] = "Девочки"; draw(); } }, "мальчики / девочки") : null);
+          var subs = Object.keys(bySubject);
+          if (subs.length) {
+            var fs = sel([["", "как в другом предмете…"]].concat(subs.map(function (k) { return [k, k]; })), "");
+            fs.onchange = function () {
+              var gs = (bySubject[fs.value] || []).slice().sort(function (x, y) { return x.id - y.id; }); if (!gs.length) return;
+              N = Math.min(4, Math.max(2, gs.length)); studs.forEach(function (s) { pick[s.id] = N - 1; });
+              gs.forEach(function (x, gi) { names[gi] = x.group_name || (gi + 1) + " подгруппа"; x.student_ids.forEach(function (sid) { if (pick[sid] !== undefined && gi < N) pick[sid] = gi; }); });
+              draw();
+            };
+            quick.appendChild(fs);
+          }
+          host.appendChild(quick);
+          var tb = h("div", { style: { columns: "2", maxHeight: "40vh", overflow: "auto" } }, studs.map(function (s) {
+            var ss = sel([].concat(Array.apply(null, Array(N)).map(function (_, g) { return [g, names[g] || (g + 1) + " подгруппа"]; })), pick[s.id]);
+            ss.style.width = "150px"; ss.onchange = function () { pick[s.id] = +ss.value; recount(); };
+            return h("div", { style: { display: "flex", gap: "6px", alignItems: "center", margin: "1px 0" } }, h("span", { style: { flex: 1 } }, s.last_name + " " + s.first_name), ss);
+          }));
+          host.appendChild(tb);
+          recount();
+        }
+        function recount() { for (var g = 0; g < N; g++) { var e = document.getElementById("sg-cnt-" + g); if (e) e.textContent = "Учащихся: " + studs.filter(function (s) { return pick[s.id] === g; }).length; } }
+        draw();
+        modal("Разделить на подгруппы · " + a.subject, h("div", null, h("div", { class: "hint" }, "Каждая подгруппа получит свой журнал и своего учителя. Учащиеся делятся без пересечений. Если по предмету уже есть уроки в журнале, они останутся у первой подгруппы."), host),
+          [{ text: "Разделить", cls: "pri", fn: async function () {
+            var groups = [];
+            for (var g = 0; g < N; g++) groups.push({ name: names[g], teacher_id: teach[g] !== undefined ? teach[g] : (g === 0 ? a.teacher_id : ""), student_ids: studs.filter(function (s) { return pick[s.id] === g; }).map(function (s) { return s.id; }) });
+            var r = await POST("/api/assignments/" + a.id + "/split", { groups: groups });
+            toast("Создано подгрупп: " + r.ids.length + (r.lessons_in_first ? ". Прежние уроки (" + r.lessons_in_first + ") остались у первой подгруппы." : "")); route();
+          } }]);
       });
     }
   };
@@ -2289,6 +2364,12 @@
           return h("tr", null, h("td", null, v.name), h("td", null, "с " + fmtDate(v.start_date) + (v.end_date ? " по " + fmtDate(v.end_date) : "")), h("td", { class: "n" }, v.weeks), h("td", { class: "n" }, v.items),
             h("td", null, L.can_edit ? [
               h("button", { onclick: function () { location.hash = "#/schedule?tab=grid&sid=" + v.id; } }, "Сетка"), " ",
+              h("button", { onclick: function () {
+                var f = buildForm([{ k: "name", label: "Название", wide: true }, { k: "start_date", label: "Действует с", type: "date" },
+                  { k: "weeks", label: "Чередование", type: "select", options: [[1, "одна неделя"], [2, "две недели (нечётная / чётная)"]] }], { name: v.name, start_date: v.start_date, weeks: v.weeks });
+                modal("Версия расписания", h("div", null, f, h("div", { class: "hint" }, "Можно указать любую дату начала, в том числе прошедшую (например, 1 сентября): расписание применится к уже прошедшим дням — по нему можно создать уроки в журнале по КТП и увидеть расписание за прошлые даты.")),
+                  [{ text: "Сохранить", cls: "pri", fn: async function () { await PUT("/api/schedule/" + v.id, f.values()); toast("Сохранено"); route(); } }]);
+              } }, "Изменить"), " ",
               h("button", { onclick: safe(async function () { await importSched(v); }) }, "Загрузить из Excel"), " ",
               h("button", { class: "danger", onclick: safe(async function () { if (!confirmBox("Удалить версию «" + v.name + "»?")) return; await DEL("/api/schedule/" + v.id); route(); }) }, "Удалить")] : null));
         }))) : h("div", { class: "muted" }, "Версий пока нет."));
@@ -2296,7 +2377,7 @@
         var f = buildForm([{ k: "name", label: "Название", wide: true }, { k: "start_date", label: "Действует с", type: "date" },
           { k: "weeks", label: "Чередование", type: "select", options: [[1, "одна неделя"], [2, "две недели (нечётная / чётная)"]] },
           { k: "copy_from", label: "Скопировать сетку из", type: "select", options: [["", "— пустая —"]].concat(L.versions.map(function (v) { return [v.id, v.name]; })) }],
-          { start_date: new Date().toISOString().slice(0, 10), weeks: 1, copy_from: L.versions.length ? L.versions[L.versions.length - 1].id : "" });
+          { start_date: L.versions.length ? new Date().toISOString().slice(0, 10) : (yearStart() || new Date().toISOString().slice(0, 10)), weeks: 1, copy_from: L.versions.length ? L.versions[L.versions.length - 1].id : "" });
         modal("Новая версия расписания", h("div", null, f, h("div", { class: "hint" }, "Новая версия действует с указанной даты; прежние остаются для уже прошедших дат. Для двух недель первая неделя — та, в которую попадает дата начала.")),
           [{ text: "Создать", cls: "pri", fn: async function () { var r = await POST("/api/schedule", Object.assign(f.values(), { year_id: yid() })); location.hash = "#/schedule?tab=grid&sid=" + r.id; } }]);
       } }, "+ Новая версия")));
@@ -2682,6 +2763,10 @@
   }
 
   // ===================================================================== 1.5: кабинеты, дежурство, киоски, импорт aSc, HTTPS
+  function yearStart() {
+    var ps = (S._periods || []).filter(function (p) { return p.start_date; }).map(function (p) { return p.start_date; }).sort();
+    return ps[0] || "";
+  }
   var KIND_NAMES = { regular: "Обычный", gym: "Спортзал", computer: "Компьютерный класс", hall: "Актовый зал" };
   function lessonLabel(bells, n) {
     var b = bells[n];
@@ -2928,6 +3013,62 @@
         }) }, "Импорт…"),
         D.has_server ? h("button", { class: "danger", onclick: safe(async function () { if (!confirmBox("Удалить сертификат с этого компьютера?")) return; await DEL("/api/https"); route(); }) }, "Удалить") : null)));
   }
+
+    // ===================================================================== 1.5.1: «Как пользоваться» (руководство по вкладкам, поиск)
+  function helpBlock(b) {
+    if (typeof b === "string") return h("p", null, b);
+    if (b.ol) return h("ol", null, b.ol.map(function (x) { return h("li", null, x); }));
+    if (b.ul) return h("ul", null, b.ul.map(function (x) { return h("li", null, x); }));
+    if (b.note) return h("div", { class: "help-note" }, h("b", null, "Совет. "), b.note);
+    if (b.warn) return h("div", { class: "warnbox" }, h("b", null, "Важно. "), b.warn);
+    if (b.go) return h("p", null, h("a", { href: b.go[0] }, "→ " + b.go[1]));
+    return null;
+  }
+  function helpText(b) {
+    if (typeof b === "string") return b;
+    return [].concat(b.ol || [], b.ul || [], b.note || [], b.warn || [], b.go ? [b.go[1]] : []).join(" ");
+  }
+  ROUTES.help = async function (params) {
+    var H = window.SG_HELP || [];
+    head("Как пользоваться", "Руководство пользователя SchoolGrade — по разделам (вкладки) и с поиском по всему тексту");
+    var q = h("input", { type: "search", placeholder: "Поиск: например, «подгруппы», «пароль», «КТП»", value: params.q || "", style: { width: "320px" } });
+    $main.appendChild(h("div", { class: "bar" }, q));
+    var tab = params.tab || H[0].id;
+    var tabsBox = h("div", { class: "tabs" }), area = h("div", { class: "help" });
+    $main.appendChild(tabsBox); $main.appendChild(area);
+    function sectionCard(cat, sec, hl) {
+      var id = "help-" + cat.id + "-" + H.indexOf(cat) + "-" + cat.sections.indexOf(sec);
+      return h("div", { class: "card help-sec", id: id }, h("h3", null, sec.title, hl ? h("span", { class: "muted", style: { fontWeight: "400" } }, "  · " + cat.title) : null), sec.body.map(helpBlock));
+    }
+    function draw() {
+      clear(tabsBox); clear(area);
+      var term = q.value.trim().toLowerCase();
+      if (term) {
+        var found = 0;
+        H.forEach(function (cat) { cat.sections.forEach(function (sec) {
+          var text = (sec.title + " " + sec.body.map(helpText).join(" ")).toLowerCase();
+          if (text.indexOf(term) >= 0) { found++; area.appendChild(sectionCard(cat, sec, true)); }
+        }); });
+        if (!found) area.appendChild(h("div", { class: "card muted" }, "Ничего не найдено. Попробуйте другое слово или откройте раздел по вкладкам (очистите поиск)."));
+        else area.insertBefore(h("div", { class: "muted", style: { marginBottom: "8px" } }, "Найдено разделов: " + found), area.firstChild);
+        return;
+      }
+      H.forEach(function (c) {
+        tabsBox.appendChild(h("a", { href: "javascript:void 0", class: tab === c.id ? "on" : "", onclick: function () { tab = c.id; params.tab = c.id; setParams(params); draw(); window.scrollTo(0, 0); } }, c.title));
+      });
+      var cat = H.filter(function (c) { return c.id === tab; })[0] || H[0];
+      area.appendChild(h("div", { class: "muted", style: { marginBottom: "8px" } }, "Для кого: " + cat.who));
+      if (cat.sections.length > 3) {
+        area.appendChild(h("div", { class: "card help-toc" }, h("b", null, "В этом разделе: "), cat.sections.map(function (sec, i) {
+          return h("a", { href: "javascript:void 0", style: { marginRight: "14px", display: "inline-block" }, onclick: function () {
+            var el = area.querySelectorAll(".help-sec")[i]; if (el && el.scrollIntoView) el.scrollIntoView({ behavior: "smooth", block: "start" }); } }, sec.title);
+        })));
+      }
+      cat.sections.forEach(function (sec) { area.appendChild(sectionCard(cat, sec, false)); });
+    }
+    q.oninput = function () { params.q = q.value; setParams(params); draw(); };
+    draw();
+  };
 
   boot();
 })();

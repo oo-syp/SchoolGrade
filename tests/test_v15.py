@@ -402,6 +402,64 @@ class V15Test(unittest.TestCase):
         pub = cert.CertStore(os.path.join(self.app.data_dir, "certs")).export_zip(False)
         self.c.call("POST", "/api/https/import", {"files": [{"name": "p.zip", "data": b64(pub)}]}, expect=400)
 
+    def test_18_backdate_version_and_ktp_hint(self):
+        # дату начала версии можно изменить на прошедшую; КТП по расписанию подсказывает причину, если уроков в сетке нет
+        sid = self.c.call("POST", "/api/schedule", {"start_date": "2026-12-20", "name": "поздняя"})["id"]
+        self.c.call("PUT", "/api/schedule/%d" % sid, {"start_date": "2026-09-02"})
+        v = [x for x in self.c.call("GET", "/api/schedule")["versions"] if x["id"] == sid][0]
+        self.assertEqual(v["start_date"], "2026-09-02")
+        self.c.call("PUT", "/api/schedule/%d" % sid, {"start_date": "2026-09-01"}, expect=400)   # дата занята основной версией
+        subs = dict((x["name"], x["id"]) for x in self.c.call("GET", "/api/subjects"))
+        self.c.call("POST", "/api/assignments", {"class_id": self.cid2, "subject_id": subs["Физика"], "teacher_id": self.t1, "hours": 1})
+        aid = self.app.db.val("SELECT MAX(id) FROM assignments")
+        self.c.call("PUT", "/api/assignments/%d/ktp" % aid, {"items": [{"num": 1, "topic": "Т1", "hours": 1}]})
+        r = self.c.call("POST", "/api/assignments/%d/ktp/schedule" % aid, {"mode": "lessons", "use_schedule": True, "start": "2026-09-01", "from": "first", "dry_run": True})
+        self.assertEqual(r["slots"], [])
+        self.assertIn("нет ни одного урока", r["hint"])
+
+    def test_19_subgroups(self):
+        """1.5.1: состав подгруппы возвращается в списке (галочки не теряются), деление на подгруппы одним действием."""
+        c = self.c
+        cid = c.call("POST", "/api/classes", {"grade": 7, "letter": "В"})["id"]
+        ids = []
+        for i, (ln, g) in enumerate((("Андреев", "м"), ("Борисова", "ж"), ("Власов", "м"), ("Громова", "ж"))):
+            ids.append(c.call("POST", "/api/students", {"class_id": cid, "last_name": ln, "first_name": "Имя", "gender": g})["id"])
+        subs = dict((s["name"], s["id"]) for s in c.call("GET", "/api/subjects"))
+        sid = subs.get("Иностранный язык") or subs["Математика"]
+        c.call("POST", "/api/assignments", {"class_id": cid, "subject_id": sid, "teacher_id": self.t1, "hours": 3})
+        a = [x for x in c.call("GET", "/api/assignments?class_id=%d" % cid)][0]
+        self.assertEqual(a["student_ids"], [])
+        # ручной состав → при повторном чтении виден
+        c.call("PUT", "/api/assignments/%d" % a["id"], {"student_ids": ids[:2], "group_name": "Ручная"})
+        a = c.call("GET", "/api/assignments?class_id=%d" % cid)[0]
+        self.assertEqual(sorted(a["student_ids"]), sorted(ids[:2]))
+        self.assertEqual(a["n_sub"], 2)
+        # деление: ошибки
+        base = "/api/assignments/%d/split" % a["id"]
+        g = lambda n, t, s_: {"name": n, "teacher_id": t, "student_ids": s_}
+        c.call("POST", base, {"groups": [g("1", self.t1, ids[:2])]}, expect=400)                         # одна подгруппа
+        c.call("POST", base, {"groups": [g("1", self.t1, ids[:2]), g("2", self.t2, ids[2:3])]}, expect=400)  # не все
+        c.call("POST", base, {"groups": [g("1", self.t1, ids[:3]), g("2", self.t2, ids[2:])]}, expect=400)   # пересечение
+        c.call("POST", base, {"groups": [g("Х", self.t1, ids[:2]), g("х", self.t2, ids[2:])]}, expect=400)   # одинаковые названия
+        # успех
+        r = c.call("POST", base, {"groups": [g("Мальчики", self.t1, [ids[0], ids[2]]), g("Девочки", self.t2, [ids[1], ids[3]])]})
+        self.assertEqual(len(r["ids"]), 2)
+        rows = c.call("GET", "/api/assignments?class_id=%d" % cid)
+        self.assertEqual(sorted(x["group_name"] for x in rows), ["Девочки", "Мальчики"])
+        by = dict((x["group_name"], x) for x in rows)
+        self.assertEqual(sorted(by["Девочки"]["student_ids"]), sorted([ids[1], ids[3]]))
+        self.assertEqual(by["Девочки"]["teacher_id"], self.t2)
+        self.assertEqual(by["Девочки"]["hours"], by["Мальчики"]["hours"])
+        # учитель без прав управления делить не может
+        self.t.call("POST", base, {"groups": [g("1", self.t1, ids[:2]), g("2", self.t2, ids[2:])]}, expect=403)
+
+
+    def test_20_help_served(self):
+        body = self.get("/help.js").read().decode("utf-8")
+        self.assertIn("window.SG_HELP", body)
+        self.assertIn("Как создать подгруппы", body)
+        self.assertIn("help.js", self.get("/").read().decode("utf-8"))
+
     def test_17_server_info(self):
         i = self.c.call("GET", "/api/server_info")
         self.assertTrue(i["urls"][0].startswith("http://"))
