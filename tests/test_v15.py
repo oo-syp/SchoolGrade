@@ -172,7 +172,7 @@ class V15Test(unittest.TestCase):
         con.commit()
         con.close()
         d = DB.Database(p)       # миграция 5 -> 6
-        self.assertEqual(d.val("SELECT value FROM meta WHERE key='schema'"), "6")
+        self.assertEqual(d.val("SELECT value FROM meta WHERE key='schema'"), "7")
         self.assertTrue(any(r["name"] == "room_id" for r in d.q("PRAGMA table_info(schedule_items)")))
         self.assertEqual(d.val("SELECT COUNT(*) FROM classrooms"), 0)
         d.close()

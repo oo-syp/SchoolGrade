@@ -168,6 +168,7 @@ FEATURE_LIST = [
     ("ktp", "Тематическое планирование (КТП)", "Работа"),
     ("schedule", "Расписание уроков", "Работа"),
     ("subs", "Замены учителей", "Работа"),
+    ("pulse", "Активность (SchoolPulse): события на уроке", "Работа"),
     ("clubs", "Журнал факультативов и объединений по интересам", "Работа"),
     ("classroom", "Кабинет классного руководителя", "Работа"),
     ("control", "Контроль накопляемости", "Анализ"),
@@ -190,6 +191,7 @@ FEATURE_PATHS = [
     (re.compile(r"^/api/(assignments/\d+/ktp|ktp/|reports/ktp_progress)"), "ktp"),
     (re.compile(r"^/api/(schedule|classrooms|duty|rooms/|alert|kiosk)"), "schedule"),
     (re.compile(r"^/api/subs"), "subs"),
+    (re.compile(r"^/api/pulse"), "pulse"),
     (re.compile(r"^/api/classroom"), "classroom"),
     (re.compile(r"^/api/reports/accumulation"), "control"),
     (re.compile(r"^/api/reports/risk"), "risk"),
@@ -2376,3 +2378,4 @@ def rep_ktp_progress(req):
 from . import stlink  # noqa: E402,F401
 from . import v14  # noqa: E402,F401
 from . import v15  # noqa: E402,F401
+from . import pulse  # noqa: E402,F401

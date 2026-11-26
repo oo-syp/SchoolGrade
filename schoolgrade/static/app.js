@@ -235,6 +235,7 @@
   // [адрес, название, доступ, функция (отключаемая администратором)]
   var NAV_SCHOOL = [
     ["Работа", [["#/", "Главная"], ["#/sheet", "Ведомость класса", null, "sheet"], ["#/journal", "Электронный журнал", "journal", "journal"],
+      ["#/pulse", "Активность", "pulse", "pulse"],
       ["#/clubs", "Журнал ФЗ и ОпИ", "journal", "clubs"], ["#/finals", "Отметки по предмету", null, "finals"],
       ["#/behavior", "Поведение и итоги года", null, "behavior"], ["#/cards", "Табели для родителей", null, "cards"],
       ["#/ktp", "Тематическое планирование", null, "ktp"], ["#/schedule", "Расписание", null, "schedule"], ["#/subs", "Замены", null, "subs"],
@@ -262,6 +263,7 @@
         if (it[2] === "all") return u.can_manage || u.role === "viewer";
         if (it[3] && !featOn(it[3])) return false;
         if (it[2] === "journal") return journalOn();
+        if (it[2] === "pulse") return true;
         if (it[2] === "classroom") return u.can_manage || (u.own_classes || []).length > 0;
         return true;
       });
@@ -3070,5 +3072,7 @@
     draw();
   };
 
+  if (window.SG_PULSE) window.SG_PULSE({ S: S, h: h, clear: clear, toast: toast, GET: GET, POST: POST, PUT: PUT, DEL: DEL, safe: safe, sel: sel, field: field,
+    modal: modal, head: head, setParams: setParams, ROUTES: ROUTES, confirmBox: confirmBox, getMain: function () { return $main; } });
   boot();
 })();

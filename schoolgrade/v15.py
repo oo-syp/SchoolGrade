@@ -423,6 +423,9 @@ def kiosk_get(h, path, query):
         return h._send(200, data, "application/x-x509-ca-cert", [("Content-Disposition", 'attachment; filename="schoolca%s"' % path[-4:])])
     if not kiosk_enabled():
         return h._send(404, "Публичные экраны отключены администратором", "text/plain; charset=utf-8")
+    if path.startswith("/kiosk/pulse/"):
+        from . import pulse
+        return pulse.kiosk_get(h, path, query)
     if path == "/kiosk/events":
         return _sse(h)
     m = re.match(r"^/kiosk/data/(class|teacher|room)/(\d+)$", path) or re.match(r"^/kiosk/data/(school)()$", path)

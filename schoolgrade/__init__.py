@@ -8,7 +8,7 @@
 """
 
 APP_NAME = "SchoolGrade"
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.6.0"
 APP_ORG = "Общественная организация «Союз юных педагогов»"
 APP_AUTHOR = "Костянко Денис Александрович"
 APP_CITY_YEAR = "Витебск, 2026"

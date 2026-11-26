@@ -10,7 +10,7 @@ import sqlite3
 import threading
 import time
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
@@ -231,6 +231,35 @@ CREATE TABLE IF NOT EXISTS behavior (
     PRIMARY KEY(class_id, student_id, kind)
 );
 
+-- 1.6: SchoolPulse («Активность»): события на уроке и вне урока
+CREATE TABLE IF NOT EXISTS pulse_types (
+    id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'positive',      -- presence | positive | negative | extra
+    role TEXT NOT NULL DEFAULT '',                  -- exit | return | late | ''
+    polarity TEXT NOT NULL DEFAULT 'none',          -- pos | neg | none (как событие влияет на поведение)
+    color TEXT NOT NULL DEFAULT '#6e6e73', icon TEXT NOT NULL DEFAULT '',
+    is_active INTEGER NOT NULL DEFAULT 1, is_extracurricular INTEGER NOT NULL DEFAULT 0,
+    affects_behavior_recommendation INTEGER NOT NULL DEFAULT 0, behavior_weight REAL NOT NULL DEFAULT 0,
+    max_per_lesson INTEGER NOT NULL DEFAULT 0, sort_order INTEGER NOT NULL DEFAULT 100
+);
+CREATE TABLE IF NOT EXISTS pulse_events (
+    id INTEGER PRIMARY KEY, student_id INTEGER NOT NULL, class_id INTEGER NOT NULL,
+    type_id INTEGER NOT NULL, lesson_id INTEGER, assignment_id INTEGER,
+    date TEXT NOT NULL, event_time TEXT NOT NULL, created_by INTEGER, batch_id TEXT DEFAULT '', note TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS ix_pe_class ON pulse_events(class_id, date);
+CREATE INDEX IF NOT EXISTS ix_pe_lesson ON pulse_events(lesson_id, student_id);
+CREATE INDEX IF NOT EXISTS ix_pe_student ON pulse_events(student_id, date);
+CREATE TABLE IF NOT EXISTS pulse_events_archive (
+    id INTEGER PRIMARY KEY, student_id INTEGER NOT NULL, class_id INTEGER NOT NULL,
+    type_id INTEGER NOT NULL, lesson_id INTEGER, assignment_id INTEGER,
+    date TEXT NOT NULL, event_time TEXT NOT NULL, created_by INTEGER, batch_id TEXT DEFAULT '', note TEXT DEFAULT '',
+    archived_at TEXT
+);
+CREATE TABLE IF NOT EXISTS pulse_lesson_end (
+    lesson_id INTEGER PRIMARY KEY, ended_at TEXT NOT NULL, ended_by INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS audit (
     id INTEGER PRIMARY KEY, ts TEXT DEFAULT (datetime('now','localtime')),
     user_id INTEGER, login TEXT, ip TEXT, action TEXT, details TEXT
@@ -366,6 +395,9 @@ class Database(object):
                     "INSERT INTO classrooms(name,short,sort) VALUES(?,?,?)", (nm, nm, (i + 1) * 10)).lastrowid
                 self.conn.execute("UPDATE schedule_items SET room_id=? WHERE TRIM(room)=?", (rid, nm))
             self.conn.execute("UPDATE meta SET value='6' WHERE key='schema'")
+        if cur < 7:
+            # 1.6: SchoolPulse — таблицы создаёт SCHEMA (CREATE IF NOT EXISTS); типы событий заполняет pulse.ensure_types()
+            self.conn.execute("UPDATE meta SET value='7' WHERE key='schema'")
 
     # ------------------------------------------------------------ helpers
     def q(self, sql, args=()):
